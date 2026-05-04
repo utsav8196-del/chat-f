@@ -14,7 +14,7 @@ const CTASection = () => {
                         </p>
                         <div className="card-actions justify-center items-stretch flex flex-col sm:flex-row gap-4">
                             <Link to="/signup" className="btn btn-primary btn-lg">Create Free Account</Link>
-                            <a href="#features" className="btn btn-outline btn-lg">Explore Features</a>
+                            <Link to="#features" className="btn btn-outline btn-lg">Explore Features</Link>
                         </div>
                     </div>
                 </div>

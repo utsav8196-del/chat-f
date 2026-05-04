@@ -1,6 +1,7 @@
 import { MessageSquareText, Sun, Moon, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 import ThemeSelector from '../ThemeSelector';
+import { Link } from 'react-router';
 
 export default function Navbar() {
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -26,8 +27,8 @@ export default function Navbar() {
                     {/* Desktop navigation */}
                     <div className="hidden md:flex items-center space-x-4">
                         <ThemeSelector />
-                        <a href="/login" className="btn btn-ghost">Sign In</a>
-                        <a href="/signup" className="btn btn-primary">Sign Up</a>
+                        <Link to="/login" className="btn btn-ghost">Sign In</Link>
+                        <Link to="/signup" className="btn btn-primary">Sign Up</Link>
                     </div>
 
                     {/* Mobile menu button */}
@@ -49,20 +50,12 @@ export default function Navbar() {
                     <div className="flex justify-center">
                         <ThemeSelector />
                     </div>
-                    <a
-                        href="/login"
-                        className="btn btn-ghost w-full justify-start"
-                        onClick={() => setMobileMenuOpen(false)}
-                    >
+                <Link to="/login" className="btn btn-ghost w-full justify-start" onClick={() => setMobileMenuOpen(false)}>
                         Sign In
-                    </a>
-                    <a
-                        href="/signup"
-                        className="btn btn-primary w-full justify-start"
-                        onClick={() => setMobileMenuOpen(false)}
-                    >
+                    </Link>
+                    <Link to="/signup" className="btn btn-primary w-full justify-start" onClick={() => setMobileMenuOpen(false)}>
                         Sign Up
-                    </a>
+                    </Link>
                 </div>
             </div>
         </nav>
