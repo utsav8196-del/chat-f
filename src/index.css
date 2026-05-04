@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.str-chat__channel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(-45deg, #654ea3, #eaafc8, #599e70, #28796a) !important;
+    background-size: 400% 400%;
+    animation: gradientFlow 12s ease infinite;
+    border-radius: 16px;
+    box-shadow: 0 0 40px rgba(255, 110, 196, 0.4),
+        0 0 80px rgba(120, 115, 245, 0.3);
+    border-radius: 16px;
+    height: 100% !important;
+    padding: 0.5rem 2rem;
+}
+
+@keyframes gradientFlow {
+    0% {
+        background-position: 0% 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0% 50%;
+    }
+}
+
+@media screen and (min-width: 424px) {
+    .str-chat__channel {
+        max-height: 100% !important;
+    }
+}
+
+.str-chat__container {
+    max-width: 1200px;
+    width: 100%;
+    height: 85% !important;
+    margin: 0 auto !important;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+}
+
+.str-chat__list {
+    background-color: #ffffff;
+    padding: 12px;
+}
+
+.str-chat__list-notifications {
+    display: none;
+}
+
+.str-chat__message-input {
+    border-top: 1px solid #ddd;
+}
+
+.str-chat__theme-dark {
+    --str-chat__background-color: #333 !important;
+    --str-chat__secondary-background-color: #222 !important;
+}
+
+.str-chat__list-notifications {
+    height: 0 !important;
+}
+
+/* Add to your global CSS */
+.transition-all {
+    transition-property: all;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 150ms;
+}
