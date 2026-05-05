@@ -34,26 +34,40 @@ const ChatPage = () => {
 
     const { authUser } = useAuthUser();
 
-    const { data: tokenData } = useQuery({
+    const {
+        data: tokenData,
+        isLoading: tokenLoading,
+        error: tokenError,
+    } = useQuery({
         queryKey: ["streamToken", targetUserId],
         queryFn: () => getStreamToken(targetUserId),
         enabled: !!authUser && !!targetUserId,
+        retry: false,
     });
 
     useEffect(() => {
+        let isMounted = true;
+        let client = null;
+
         const initChat = async () => {
             if (!tokenData?.token || !authUser) return;
+
+            if (!STREAM_API_KEY) {
+                toast.error("Missing Stream API key. Please configure VITE_STREAM_API_KEY.");
+                setLoading(false);
+                return;
+            }
 
             try {
                 console.log("Initializing stream chat client...");
 
-                const client = StreamChat.getInstance(STREAM_API_KEY);
+                client = StreamChat.getInstance(STREAM_API_KEY);
 
                 await client.connectUser(
                     {
                         id: authUser._id,
                         name: authUser.fullName,
-                        image: authUser.profilePic,
+                        image: authUser.profilePic || "",
                     },
                     tokenData.token
                 );
@@ -66,29 +80,41 @@ const ChatPage = () => {
 
                 await currChannel.watch();
 
+                if (!isMounted) {
+                    client.disconnectUser().catch(() => {});
+                    return;
+                }
+
                 setChatClient(client);
                 setChannel(currChannel);
             } catch (error) {
                 console.error("Error initializing chat:", error);
-                toast.error("Could not connect to chat. Please try again.");
+                toast.error(error?.message || "Could not connect to chat. Please try again.");
             } finally {
-                setLoading(false);
+                if (isMounted) setLoading(false);
             }
         };
 
         initChat();
+
+        return () => {
+            isMounted = false;
+            if (client) {
+                client.disconnectUser().catch(() => {});
+            }
+        };
     }, [tokenData, authUser, targetUserId]);
 
     const handleVideoCall = () => {
-        if (channel) {
-            const callUrl = `${window.location.origin}/call/${channel.id}`;
+        if (!channel) return;
+
+        const callUrl = `${window.location.origin}/call/${channel.id}`;
 
         channel.sendMessage({
             text: `I've started a video call. Join me here: ${callUrl}`,
         });
 
         toast.success("Video call link sent successfully!");
-        }
     };
 
     const {chatTheme,setChatTheme}=useChatThemeStore();
@@ -98,7 +124,15 @@ const ChatPage = () => {
         setChatTheme(newTheme);
     }
 
-    if (loading || !chatClient || !channel) return <ChatLoader />;
+    if (loading || tokenLoading || !chatClient || !channel) return <ChatLoader />;
+
+    if (tokenError) {
+        return (
+            <div className="p-8 text-center text-red-500">
+                Unable to initialize chat. Please refresh or try again later.
+            </div>
+        );
+    }
 
     return (
         <div className="flex flex-col h-[calc(100vh-64px)] relative w-full ">
