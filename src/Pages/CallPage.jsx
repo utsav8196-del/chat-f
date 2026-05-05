@@ -36,9 +36,9 @@ const ChatPage = () => {
   const { authUser } = useAuthUser();
 
   const { data: tokenData } = useQuery({
-    queryKey: ["streamToken"],
-    queryFn: getStreamToken,
-    enabled: !!authUser, // this will run only when authUser is available
+    queryKey: ["streamToken", targetUserId],
+    queryFn: () => getStreamToken(targetUserId),
+    enabled: !!authUser && !!targetUserId,
   });
 
   useEffect(() => {
