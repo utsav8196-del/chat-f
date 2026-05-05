@@ -1,114 +1,128 @@
 import { useState } from "react";
-import axios from "axios";
+import { MessageSquareText } from "lucide-react";
+import { Link } from "react-router";
+import useLogin from "../hooks/useLogin";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_URL ||
-  import.meta.env.VITE_BACKEND_URL ||
-  "https://chat-b-hxym.onrender.com";
+const LoginPage = () => {
+    const [loginData, setLoginData] = useState({
+        email: "",
+        password: "",
+    });
 
-const BACKEND_URL = API_BASE_URL.replace(/\/+$/, "").replace(/\/api$/, "");
+    // This is how we did it using our custom hook - optimized version
+    const { isPending, error, loginMutation } = useLogin();
 
-const api = axios.create({
-  baseURL: BACKEND_URL,
-  withCredentials: true,
-});
+    const handleLogin = (e) => {
+        e.preventDefault();
+        loginMutation(loginData);
+    };
 
-function getErrorMessage(error) {
-  return (
-    error?.response?.data?.message ||
-    error?.message ||
-    "Login failed. Please try again."
-  );
-}
+    return (
+        <div className="h-screen flex items-center justify-center p-4 sm:p-6 md:p-8" data-theme="forest">
+            <div className="border border-primary/25 flex flex-col lg:flex-row w-full max-w-5xl mx-auto bg-base-100 rounded-lg shadow-lg overflow-hidden">
 
-export default function LoginPage() {
-  const [formData, setFormData] = useState({
-    email: "",
-    password: "",
-  });
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState("");
+                {/* IMAGE SECTION */}
+                <div className="hidden lg:flex w-full lg:w-1/2 bg-primary/10 items-center justify-center">
+                    <div className="max-w-md p-8">
+                        {/* Illustration */}
+                        <div className="relative aspect-square max-w-sm mx-auto">
+                        <img src="/login.png" alt="Language connection illustration" className="w-full h-full" />
+                        </div>
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-    setIsLoading(true);
-    setError("");
+                        <div className="text-center space-y-3 mt-6">
+                        <h2 className="text-xl font-semibold">Connect with native speakers instantly</h2>
+                        <p className="opacity-70">
+                            Real conversations with chat and video calls!!
+                        </p>
+                        </div>
+                    </div>
+                </div>
 
-    try {
-      await api.post("/api/auth/login", formData);
-      window.location.href = "/";
-    } catch (loginError) {
-      setError(getErrorMessage(loginError));
-    } finally {
-      setIsLoading(false);
-    }
-  }
+                {/* LOGIN FORM SECTION */}
+                <div className="w-full lg:w-1/2 p-4 sm:p-8 flex flex-col">
+                    {/* LOGO */}
+                    <div className="mb-4 flex items-center justify-start gap-2">
+                        <MessageSquareText className="size-9 text-primary" />
+                        <span className="text-3xl font-bold font-mono bg-clip-text text-transparent bg-gradient-to-r from-primary to-secondary  tracking-wider">
+                        StackChat
+                        </span>
+                    </div>
 
-  return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div className="w-full max-w-md space-y-6">
-        <div className="text-center space-y-2">
-          <h1 className="text-3xl font-bold">Welcome back</h1>
-          <p className="text-base-content/70">Log in to continue to StackChat</p>
+                    {/* ERROR MESSAGE DISPLAY */}
+                    {error && (
+                        <div className="alert alert-error mb-4">
+                        <span>
+                            {error.response?.data?.message || error.message || "An error occurred during login"}
+                        </span>
+                        </div>
+                    )}
+
+                    <div className="w-full">
+                        <form onSubmit={handleLogin}>
+                        <div className="space-y-4">
+                            <div>
+                            <h2 className="text-xl font-semibold">Welcome Back</h2>
+                            <p className="text-sm opacity-70">
+                                Sign in to start the conversations to connect!
+                            </p>
+                            </div>
+
+                            <div className="flex flex-col gap-3">
+                            <div className="form-control w-full space-y-2">
+                                <label className="label">
+                                <span className="label-text">Email</span>
+                                </label>
+                                <input
+                                    type="email"
+                                    placeholder="hello@example.com"
+                                    className="input input-bordered w-full rounded-lg"
+                                    value={loginData.email}
+                                    onChange={(e) => setLoginData({ ...loginData, email: e.target.value })}
+                                    required
+                                />
+                            </div>
+
+                            <div className="form-control w-full space-y-2">
+                                <label className="label">
+                                <span className="label-text">Password</span>
+                                </label>
+                                <input
+                                    type="password"
+                                    placeholder="••••••••"
+                                    className="input input-bordered w-full rounded-lg"
+                                    autoComplete="current-password"
+                                    value={loginData.password}
+                                    onChange={(e) => setLoginData({ ...loginData, password: e.target.value })}
+                                    required
+                                />
+                            </div>
+
+                            <button type="submit" className="btn btn-primary w-full rounded-lg" disabled={isPending}>
+                                {isPending ? (
+                                <>
+                                    <span className="loading loading-spinner loading-xs"></span>
+                                    Signing in...
+                                </>
+                                ) : (
+                                "Sign In"
+                                )}
+                            </button>
+
+                            <div className="text-center mt-4">
+                                <p className="text-sm">
+                                Don't have an account?{" "}
+                                <Link to="/signup" className="text-primary hover:underline">
+                                    Create one
+                                </Link>
+                                </p>
+                            </div>
+                            </div>
+                        </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
         </div>
-
-        <form onSubmit={handleSubmit} className="card bg-base-100 shadow-xl">
-          <div className="card-body space-y-4">
-            <label className="form-control w-full">
-              <span className="label-text mb-2">Email</span>
-              <input
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                className="input input-bordered w-full rounded-lg"
-                value={formData.email}
-                onChange={(event) =>
-                  setFormData((current) => ({
-                    ...current,
-                    email: event.target.value,
-                  }))
-                }
-                required
-              />
-            </label>
-
-            <label className="form-control w-full">
-              <span className="label-text mb-2">Password</span>
-              <input
-                type="password"
-                autoComplete="current-password"
-                placeholder="Password"
-                className="input input-bordered w-full rounded-lg"
-                value={formData.password}
-                onChange={(event) =>
-                  setFormData((current) => ({
-                    ...current,
-                    password: event.target.value,
-                  }))
-                }
-                required
-              />
-            </label>
-
-            {error && (
-              <div className="alert alert-error">
-                <span>{error}</span>
-              </div>
-            )}
-
-            <button type="submit" className="btn btn-primary w-full" disabled={isLoading}>
-              {isLoading ? "Logging in..." : "Log in"}
-            </button>
-
-            <p className="text-center text-sm">
-              New to StackChat?{" "}
-              <a href="/signup" className="link link-primary">
-                Create account
-              </a>
-            </p>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
+    );
+};
+export default LoginPage;
