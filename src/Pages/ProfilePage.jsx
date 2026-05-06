@@ -50,7 +50,7 @@ const ProfilePage = () => {
     },
   });
 
-  // Random avatar using DiceBear (more professional and varied)
+  // Random avatar using DiceBear (multiple styles)
   const handleRandomAvatar = () => {
     const styles = ["avataaars", "fun-emoji", "bottts", "pixel-art"];
     const randomStyle = styles[Math.floor(Math.random() * styles.length)];
@@ -71,17 +71,16 @@ const ProfilePage = () => {
       return;
     }
 
-    // Create local object URL (or you could upload to cloud)
+    // Create local preview (in production, upload to server/cloud and use returned URL)
     const imageUrl = URL.createObjectURL(file);
     setProfileData({ ...profileData, profilePic: imageUrl });
     toast.success("Custom photo selected (local preview)");
-    // In production, upload the file to your server/cloud and use the returned URL
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
 
-    // Check if any field is empty
+    // Validate required fields
     if (!profileData.fullName || !profileData.bio || !profileData.location) {
       toast.error("All fields are required");
       return;
@@ -97,8 +96,6 @@ const ProfilePage = () => {
       return;
     }
 
-    // If the profile pic is a local blob (from file upload), you'd upload it first
-    // For now, we just send the URL (or you could upload to cloud here)
     profileMutation(profileData);
   };
 
@@ -197,7 +194,9 @@ const ProfilePage = () => {
                 <input
                   type="text"
                   value={profileData.fullName}
-                  onChange={(e) => setProfileData({ ...profileData, fullName: e.target.value })}
+                  onChange={(e) =>
+                    setProfileData({ ...profileData, fullName: e.target.value })
+                  }
                   className="input input-bordered w-full"
                   placeholder="Your full name"
                   disabled={!isEditing}
@@ -211,7 +210,9 @@ const ProfilePage = () => {
                 </label>
                 <textarea
                   value={profileData.bio}
-                  onChange={(e) => setProfileData({ ...profileData, bio: e.target.value })}
+                  onChange={(e) =>
+                    setProfileData({ ...profileData, bio: e.target.value })
+                  }
                   className="textarea textarea-bordered h-24"
                   placeholder="Tell others about yourself..."
                   disabled={!isEditing}
@@ -228,7 +229,9 @@ const ProfilePage = () => {
                   <input
                     type="text"
                     value={profileData.location}
-                    onChange={(e) => setProfileData({ ...profileData, location: e.target.value })}
+                    onChange={(e) =>
+                      setProfileData({ ...profileData, location: e.target.value })
+                    }
                     className="input input-bordered w-full pl-10"
                     placeholder="City, Country"
                     disabled={!isEditing}
