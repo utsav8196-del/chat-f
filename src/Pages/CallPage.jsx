@@ -12,11 +12,22 @@ import {
   PhoneOff,
   User,
   Camera,
+  AlertCircle,
 } from "lucide-react";
 
+// STUN + free TURN server (fallback when STUN alone fails)
 const configuration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+  ],
 };
+
+const CONNECTION_TIMEOUT = 15000; // 15 seconds
 
 const CallPage = () => {
   const { id: targetUserId } = useParams();
@@ -26,38 +37,42 @@ const CallPage = () => {
   const navigate = useNavigate();
   const { authUser, isLoading } = useAuthUser();
 
-  // ---------- STATE ----------
+  // ----- STATE -----
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
-  const [callPhase, setCallPhase] = useState("idle"); // idle → ringing → accepted → connecting → connected → ended
+  const [callPhase, setCallPhase] = useState("ringing"); // ringing | connecting | connected | ended
   const [mediaReady, setMediaReady] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
 
-  // ---------- REFS ----------
+  // ----- REFS (stable across rerenders) -----
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-  const socketRef = useRef(null);            // socket instance
-  const pcRef = useRef(null);                // single RTCPeerConnection
-  const streamRef = useRef(null);            // local MediaStream
-  const pendingOfferRef = useRef(null);      // buffer early offer for receiver
-  const callAcceptedRef = useRef(false);     // for caller, avoid race
+  const socketRef = useRef(null);
+  const pcRef = useRef(null);
+  const streamRef = useRef(null);
+  const pendingOfferRef = useRef(null);
+  const mediaReadyRef = useRef(false);   // keep a ref copy for callbacks
+  const callAcceptedRef = useRef(false);
+  const timeoutRef = useRef(null);
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
-  // ---------- CLEANUP ----------
+  // ----- CLEANUP -----
   const cleanupCall = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
     }
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       setLocalStream(null);
     }
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
   }, []);
 
   const goHome = useCallback(() => {
@@ -65,14 +80,14 @@ const CallPage = () => {
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // ---------- SOCKET CONNECTION ----------
+  // ----- SOCKET -----
   useEffect(() => {
     if (!authUser) return;
     const socket = io(BACKEND_URL, { withCredentials: true });
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("checkPendingCall"); // resume if receiver already accepted
+      socket.emit("checkPendingCall");
     });
 
     return () => {
@@ -80,12 +95,11 @@ const CallPage = () => {
     };
   }, [authUser]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => cleanupCall();
   }, [cleanupCall]);
 
-  // ---------- ATTACH STREAMS TO VIDEO ELEMENTS ----------
+  // ----- ATTACH STREAMS -----
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
@@ -98,7 +112,7 @@ const CallPage = () => {
     }
   }, [remoteStream]);
 
-  // ---------- ENABLE CAMERA / MIC (must be user click) ----------
+  // ----- ENABLE MEDIA (user click) -----
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -108,6 +122,7 @@ const CallPage = () => {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
       setLocalStream(stream);
+      mediaReadyRef.current = true;
       setMediaReady(true);
     } catch (err) {
       console.error("Camera/mic error:", err);
@@ -116,15 +131,31 @@ const CallPage = () => {
     }
   };
 
-  // ========== CALLER FLOW ==========
-  // Listen for callAccepted (or checkPendingCall on connect)
+  // ----- CONNECTION TIMEOUT -----
+  useEffect(() => {
+    if (callPhase === "connecting" && !connectionFailed) {
+      timeoutRef.current = setTimeout(() => {
+        if (pcRef.current && pcRef.current.connectionState !== "connected") {
+          setConnectionFailed(true);
+          toast.error("Could not establish a connection. You may be behind a symmetric NAT.");
+        }
+      }, CONNECTION_TIMEOUT);
+    }
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, [callPhase, connectionFailed]);
+
+  // ======================= CALLER =======================
+  // Always listen for callAccepted (ref‑based media check)
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "caller") return;
 
     const handleCallAccepted = () => {
       callAcceptedRef.current = true;
-      if (mediaReady) {
+      // if media already ready, start now
+      if (mediaReadyRef.current) {
         startCallerWebRTC(socket);
       } else {
         setCallPhase("accepted"); // wait for media
@@ -132,19 +163,18 @@ const CallPage = () => {
     };
 
     const handleCallDeclined = () => {
-      setCallPhase("declined");
+      setCallPhase("ended");
       toast("Call declined", { icon: "📵" });
       setTimeout(goHome, 2000);
     };
 
     socket.on("callAccepted", handleCallAccepted);
     socket.on("callDeclined", handleCallDeclined);
-
     return () => {
       socket.off("callAccepted", handleCallAccepted);
       socket.off("callDeclined", handleCallDeclined);
     };
-  }, [role, mediaReady, goHome]);
+  }, [role, goHome]); // mediaReady is read via ref, no dependency
 
   // If media becomes ready after callAccepted
   useEffect(() => {
@@ -154,7 +184,7 @@ const CallPage = () => {
   }, [mediaReady, role]);
 
   const startCallerWebRTC = useCallback(async (socket) => {
-    if (!socket || pcRef.current) return; // already created
+    if (!socket || pcRef.current) return;
     try {
       const stream = streamRef.current;
       if (!stream) return;
@@ -168,19 +198,15 @@ const CallPage = () => {
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          socket.emit("webrtc_ice_candidate", {
-            to: targetUserId,
-            candidate: event.candidate,
-          });
+          socket.emit("webrtc_ice_candidate", { to: targetUserId, candidate: event.candidate });
         }
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") setCallPhase("connected");
-        else if (
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "failed"
-        ) {
+        if (pc.connectionState === "connected") {
+          setCallPhase("connected");
+          if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
           setCallPhase("ended");
           toast.error("Call disconnected");
           goHome();
@@ -198,12 +224,12 @@ const CallPage = () => {
     }
   }, [targetUserId, goHome]);
 
-  // ========== RECEIVER FLOW ==========
-  // Create PC as soon as media is ready (only once)
+  // ======================= RECEIVER =======================
+  // Create PC once media is ready (only once)
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "receiver" || !mediaReady) return;
-    if (pcRef.current) return; // already created
+    if (pcRef.current) return;
 
     const stream = streamRef.current;
     if (!stream) return;
@@ -217,19 +243,15 @@ const CallPage = () => {
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.emit("webrtc_ice_candidate", {
-          to: targetUserId,
-          candidate: event.candidate,
-        });
+        socket.emit("webrtc_ice_candidate", { to: targetUserId, candidate: event.candidate });
       }
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "connected") setCallPhase("connected");
-      else if (
-        pc.connectionState === "disconnected" ||
-        pc.connectionState === "failed"
-      ) {
+      if (pc.connectionState === "connected") {
+        setCallPhase("connected");
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
         setCallPhase("ended");
         toast.error("Call disconnected");
         goHome();
@@ -238,7 +260,7 @@ const CallPage = () => {
 
     setCallPhase("connecting");
 
-    // If an offer arrived before PC was ready, handle it now
+    // Process any stored early offer
     if (pendingOfferRef.current) {
       const offer = pendingOfferRef.current;
       pendingOfferRef.current = null;
@@ -255,10 +277,9 @@ const CallPage = () => {
         });
     }
 
-    // Listen for new offers
+    // Listen for new offers (no signalingState check)
     const handleOffer = async ({ from, offer }) => {
       if (from !== targetUserId) return;
-      if (pc.signalingState !== "stable") return; // ignore if already processing
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
@@ -283,11 +304,10 @@ const CallPage = () => {
     return () => {
       socket.off("webrtc_offer", handleOffer);
       socket.off("callEnded", handleCallEnded);
-      // Do NOT close PC here – cleanup on unmount
     };
   }, [role, mediaReady, targetUserId, goHome]);
 
-  // For receiver: store early offer before media ready
+  // Store early offer before media ready
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "receiver") return;
@@ -299,7 +319,7 @@ const CallPage = () => {
     return () => socket.off("webrtc_offer", storeOffer);
   }, [role, targetUserId]);
 
-  // ========== COMMON: ANSWER & ICE HANDLING ==========
+  // ======================= COMMON ICE & ANSWER =======================
   useEffect(() => {
     const socket = socketRef.current;
     const pc = pcRef.current;
@@ -330,19 +350,19 @@ const CallPage = () => {
       socket.off("webrtc_answer", handleAnswer);
       socket.off("webrtc_ice_candidate", handleIceCandidate);
     };
-  }, [targetUserId]); // pc is accessed via pcRef.current, safe
+  }, [targetUserId]); // pc is read via ref
 
-  // ---------- CONTROLS ----------
+  // ----- CONTROLS -----
   const toggleMute = () => {
     if (streamRef.current) {
-      streamRef.current.getAudioTracks().forEach((track) => (track.enabled = !track.enabled));
+      streamRef.current.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
       setIsMuted(!isMuted);
     }
   };
 
   const toggleVideo = () => {
     if (streamRef.current) {
-      streamRef.current.getVideoTracks().forEach((track) => (track.enabled = !track.enabled));
+      streamRef.current.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
       setIsVideoOff(!isVideoOff);
     }
   };
@@ -362,14 +382,19 @@ const CallPage = () => {
       {callPhase === "ringing" && role === "caller" && (
         <div className="bg-yellow-600 text-white text-center py-2">Ringing...</div>
       )}
-      {callPhase === "connecting" && (
+      {callPhase === "connecting" && !connectionFailed && (
         <div className="bg-blue-600 text-white text-center py-2">Connecting...</div>
       )}
-      {callPhase === "declined" && (
-        <div className="bg-red-600 text-white text-center py-2">Call declined</div>
+      {callPhase === "connected" && (
+        <div className="bg-green-600 text-white text-center py-2">Connected</div>
       )}
       {callPhase === "ended" && (
         <div className="bg-red-600 text-white text-center py-2">Call ended</div>
+      )}
+      {connectionFailed && (
+        <div className="bg-orange-600 text-white text-center py-2 flex items-center justify-center gap-2">
+          <AlertCircle size={20} /> Connection failed – check your firewall/NAT
+        </div>
       )}
 
       {/* CAMERA PERMISSION OVERLAY */}
@@ -398,6 +423,14 @@ const CallPage = () => {
             <div className="text-white text-opacity-50 flex flex-col items-center">
               <User size={80} />
               <p>{callPhase === "ringing" ? "Waiting for answer..." : "Waiting for connection..."}</p>
+              {connectionFailed && (
+                <button
+                  onClick={goHome}
+                  className="mt-4 btn btn-outline btn-sm text-white"
+                >
+                  Go back to chat
+                </button>
+              )}
             </div>
           )}
         </div>
