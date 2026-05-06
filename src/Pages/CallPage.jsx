@@ -22,47 +22,54 @@ const CallPage = () => {
   const { id: targetUserId } = useParams();
   const [searchParams] = useSearchParams();
   const callType = searchParams.get("type") || "video";
-  const role = searchParams.get("role") || "receiver"; // "caller" or "receiver"
+  const role = searchParams.get("role") || "receiver";
   const navigate = useNavigate();
   const { authUser, isLoading } = useAuthUser();
 
   const [socket, setSocket] = useState(null);
-  const [peerConnection, setPeerConnection] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
-  const [callStatus, setCallStatus] = useState("ringing"); // ringing, connecting, connected, declined, ended
+  const [callStatus, setCallStatus] = useState("ringing");
   const [mediaReady, setMediaReady] = useState(false);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-  const callAcceptedRef = useRef(false);   // ✅ track if call accepted
-  const socketRef = useRef(null);          // to access latest socket in callbacks
+  const pcRef = useRef(null);             // keeps the single peer connection
+  const socketRef = useRef(null);
+  const callAcceptedRef = useRef(false);
+  const setupDoneRef = useRef(false);     // prevent duplicate setups
+  const pendingOfferRef = useRef(null);   // store offer if received before pc ready
+  const pendingCandidatesRef = useRef([]);// store early ICE candidates
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
-  // Cleanup
+  // Cleanup everything
   const cleanupCall = useCallback(() => {
-    if (peerConnection) peerConnection.close();
-    if (localStream) localStream.getTracks().forEach((track) => track.stop());
-  }, [peerConnection, localStream]);
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+  }, [localStream]);
 
   const goHome = useCallback(() => {
     cleanupCall();
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // Connect socket
+  // Connect socket (only once)
   useEffect(() => {
     if (!authUser) return;
     const newSocket = io(BACKEND_URL, { withCredentials: true });
     setSocket(newSocket);
     socketRef.current = newSocket;
 
-    // On connect, check for pending accepted call (for caller)
     newSocket.on("connect", () => {
       newSocket.emit("checkPendingCall");
     });
@@ -79,23 +86,20 @@ const CallPage = () => {
     };
   }, [cleanupCall]);
 
-  // Attach local stream after it's set
+  // Attach streams when refs are ready
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
 
-  // Attach remote stream
   useEffect(() => {
     if (remoteStream && remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [remoteStream]);
 
-  // ----------------------------------------------------------------
-  // Enable camera / microphone (must be called from button click)
-  // ----------------------------------------------------------------
+  // Enable media (must be from button click)
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -112,17 +116,95 @@ const CallPage = () => {
     }
   };
 
-  // ----------------------------------------------------------------
-  // Listen for callAccepted (caller) and callDeclined (both)
-  // ----------------------------------------------------------------
+  // Common WebRTC helper: create a single PC, add tracks, and set up event handlers
+  const createPeerConnection = useCallback(() => {
+    if (pcRef.current) return pcRef.current; // already exists
+
+    const currentSocket = socketRef.current;
+    if (!currentSocket || !localStream) return null;
+
+    const pc = new RTCPeerConnection(configuration);
+    pcRef.current = pc;
+
+    // Add local tracks
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+    pc.ontrack = (event) => {
+      setRemoteStream(event.streams[0]);
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && currentSocket) {
+        currentSocket.emit("webrtc_ice_candidate", {
+          to: targetUserId,
+          candidate: event.candidate,
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        setCallStatus("connected");
+      } else if (
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "failed"
+      ) {
+        setCallStatus("ended");
+        toast.error("Call disconnected");
+        goHome();
+      }
+    };
+
+    // Process any pending offer/candidates
+    if (role === "receiver" && pendingOfferRef.current) {
+      const offer = pendingOfferRef.current;
+      pendingOfferRef.current = null;
+      pc.setRemoteDescription(new RTCSessionDescription(offer))
+        .then(() => pc.createAnswer())
+        .then((answer) => {
+          pc.setLocalDescription(answer);
+          currentSocket.emit("webrtc_answer", { to: targetUserId, answer });
+        })
+        .catch((err) => {
+          console.error("Error handling pending offer:", err);
+          toast.error("Call connection failed");
+          goHome();
+        });
+    }
+
+    // Add any pending ICE candidates
+    if (pendingCandidatesRef.current.length > 0) {
+      pendingCandidatesRef.current.forEach((candidate) => {
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+      });
+      pendingCandidatesRef.current = [];
+    }
+
+    return pc;
+  }, [localStream, targetUserId, role, goHome]);
+
+  // Caller: wait for callAccepted then start WebRTC
   useEffect(() => {
     if (!socket) return;
 
     const handleCallAccepted = () => {
       callAcceptedRef.current = true;
-      // If media is already ready, start call immediately
-      if (mediaReady) {
-        startCallerWebRTC();
+      if (mediaReady && !setupDoneRef.current) {
+        setupDoneRef.current = true;
+        const pc = createPeerConnection();
+        if (pc) {
+          pc.createOffer()
+            .then((offer) => {
+              pc.setLocalDescription(offer);
+              socket.emit("webrtc_offer", { to: targetUserId, offer });
+              setCallStatus("connecting");
+            })
+            .catch((err) => {
+              console.error("Error creating offer:", err);
+              toast.error("Failed to set up call");
+              goHome();
+            });
+        }
       }
     };
 
@@ -139,128 +221,51 @@ const CallPage = () => {
       socket.off("callAccepted", handleCallAccepted);
       socket.off("callDeclined", handleCallDeclined);
     };
-  }, [socket, mediaReady]); // include mediaReady, but we'll use ref inside for safety
+  }, [socket, mediaReady, createPeerConnection, targetUserId, goHome]);
 
-  // ----------------------------------------------------------------
-  // Start WebRTC for the CALLER (only after accepted & media ready)
-  // ----------------------------------------------------------------
-  const startCallerWebRTC = useCallback(async () => {
-    const currentSocket = socketRef.current;
-    if (!currentSocket || !localStream) return;
-
-    try {
-      const pc = new RTCPeerConnection(configuration);
-      setPeerConnection(pc);
-
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-      pc.ontrack = (event) => {
-        setRemoteStream(event.streams[0]);
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          currentSocket.emit("webrtc_ice_candidate", {
-            to: targetUserId,
-            candidate: event.candidate,
-          });
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          setCallStatus("connected");
-        } else if (
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "failed"
-        ) {
-          setCallStatus("ended");
-          toast.error("Call disconnected");
-          goHome();
-        }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      currentSocket.emit("webrtc_offer", { to: targetUserId, offer });
-      setCallStatus("connecting");
-    } catch (err) {
-      console.error("Caller WebRTC setup error:", err);
-      toast.error("Failed to set up call");
-      goHome();
-    }
-  }, [localStream, targetUserId, goHome]);
-
-  // When media becomes ready and caller already received callAccepted -> start
+  // If media becomes ready after callAccepted, start the caller setup
   useEffect(() => {
-    if (mediaReady && role === "caller" && callAcceptedRef.current) {
-      startCallerWebRTC();
-    }
-  }, [mediaReady, role, startCallerWebRTC]);
-
-  // ----------------------------------------------------------------
-  // RECEIVER WebRTC setup (started when media is ready)
-  // ----------------------------------------------------------------
-  useEffect(() => {
-    if (!socket || !mediaReady || role !== "receiver") return;
-
-    const setupReceiver = async () => {
-      try {
-        const stream = localStream;
-        if (!stream) return;
-
-        const pc = new RTCPeerConnection(configuration);
-        setPeerConnection(pc);
-
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-
-        pc.ontrack = (event) => {
-          setRemoteStream(event.streams[0]);
-        };
-
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            socket.emit("webrtc_ice_candidate", {
-              to: targetUserId,
-              candidate: event.candidate,
-            });
-          }
-        };
-
-        pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") {
-            setCallStatus("connected");
-          } else if (
-            pc.connectionState === "disconnected" ||
-            pc.connectionState === "failed"
-          ) {
-            setCallStatus("ended");
-            toast.error("Call disconnected");
+    if (mediaReady && role === "caller" && callAcceptedRef.current && !setupDoneRef.current) {
+      setupDoneRef.current = true;
+      const pc = createPeerConnection();
+      if (pc) {
+        pc.createOffer()
+          .then((offer) => {
+            pc.setLocalDescription(offer);
+            socketRef.current?.emit("webrtc_offer", { to: targetUserId, offer });
+            setCallStatus("connecting");
+          })
+          .catch((err) => {
+            console.error("Error creating offer:", err);
+            toast.error("Failed to set up call");
             goHome();
-          }
-        };
-
-        setCallStatus("connecting");
-      } catch (err) {
-        console.error("Receiver WebRTC setup error:", err);
-        toast.error("Failed to set up call");
-        goHome();
+          });
       }
-    };
+    }
+  }, [mediaReady, role, createPeerConnection, targetUserId, goHome]);
 
-    setupReceiver();
-  }, [socket, mediaReady, role, targetUserId, localStream, goHome]);
-
-  // RECEIVER: handle incoming offer & call ended
+  // Receiver: setup media, create PC, and wait for offer
   useEffect(() => {
-    if (!socket || !peerConnection || role !== "receiver") return;
+    if (!socket || !mediaReady || role !== "receiver" || setupDoneRef.current) return;
 
+    setupDoneRef.current = true;
+    const pc = createPeerConnection();
+    if (!pc) return;
+
+    // Set status to connecting (we'll update when offer handles)
+    setCallStatus("connecting");
+
+    // Function to process incoming offer (may arrive before or after PC creation)
     const handleOffer = async ({ from, offer }) => {
       if (from !== targetUserId) return;
+      if (pc.signalingState !== "stable") {
+        // If we already have an offer queued, ignore
+        return;
+      }
       try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
         socket.emit("webrtc_answer", { to: targetUserId, answer });
       } catch (err) {
         console.error("Error handling offer:", err);
@@ -269,37 +274,62 @@ const CallPage = () => {
       }
     };
 
+    socket.on("webrtc_offer", handleOffer);
+
     const handleCallEnded = () => {
       setCallStatus("ended");
       toast("Call ended");
       setTimeout(goHome, 2000);
     };
-
-    socket.on("webrtc_offer", handleOffer);
     socket.on("callEnded", handleCallEnded);
 
     return () => {
       socket.off("webrtc_offer", handleOffer);
       socket.off("callEnded", handleCallEnded);
     };
-  }, [socket, peerConnection, role, targetUserId, goHome]);
+  }, [socket, mediaReady, role, targetUserId, createPeerConnection, goHome]);
 
-  // Common: handle answer & ICE for both roles
+  // Store early offer/candidates if they arrive before PC is created (rare)
   useEffect(() => {
-    if (!socket || !peerConnection) return;
+    if (!socket || setupDoneRef.current) return;
+
+    const handleEarlyOffer = ({ from, offer }) => {
+      if (from === targetUserId) pendingOfferRef.current = offer;
+    };
+    const handleEarlyCandidate = ({ from, candidate }) => {
+      if (from === targetUserId) pendingCandidatesRef.current.push(candidate);
+    };
+
+    socket.on("webrtc_offer", handleEarlyOffer);
+    socket.on("webrtc_ice_candidate", handleEarlyCandidate);
+
+    return () => {
+      socket.off("webrtc_offer", handleEarlyOffer);
+      socket.off("webrtc_ice_candidate", handleEarlyCandidate);
+    };
+  }, [socket, targetUserId]);
+
+  // Common answer/ICE handler after PC exists
+  useEffect(() => {
+    if (!socket || !pcRef.current) return;
+    const pc = pcRef.current;
 
     const handleAnswer = async ({ from, answer }) => {
       if (from !== targetUserId) return;
       try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
       } catch (err) {
         console.error("Error setting remote answer:", err);
       }
     };
 
-    const handleIceCandidate = ({ from, candidate }) => {
+    const handleIceCandidate = async ({ from, candidate }) => {
       if (from !== targetUserId) return;
-      peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error("Error adding ICE candidate:", err);
+      }
     };
 
     socket.on("webrtc_answer", handleAnswer);
@@ -309,7 +339,7 @@ const CallPage = () => {
       socket.off("webrtc_answer", handleAnswer);
       socket.off("webrtc_ice_candidate", handleIceCandidate);
     };
-  }, [socket, peerConnection, targetUserId]);
+  }, [socket, targetUserId]);
 
   // Call controls
   const toggleMute = () => {
@@ -327,8 +357,8 @@ const CallPage = () => {
   };
 
   const hangUp = () => {
-    if (socket && targetUserId) {
-      socket.emit("callEnd", { to: targetUserId });
+    if (socketRef.current && targetUserId) {
+      socketRef.current.emit("callEnd", { to: targetUserId });
     }
     goHome();
   };
