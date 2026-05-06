@@ -127,6 +127,13 @@ const ChatPage = () => {
 
   // Start a call (video or voice)
   const startCall = (type) => {
+    if (!socketRef.current) return;
+    // Emit ringing event to server
+    socketRef.current.emit("callUser", {
+      targetUserId,
+      callType: type,
+    });
+    // Navigate to call page (caller)
     navigate(`/call/${targetUserId}?type=${type}`);
   };
 

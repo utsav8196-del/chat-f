@@ -30,7 +30,7 @@ const CallPage = () => {
   const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
-  const [callStatus, setCallStatus] = useState("calling"); // calling, connected, declined, ended
+  const [callStatus, setCallStatus] = useState("ringing"); // ringing, connecting, connected, declined, ended
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -39,7 +39,29 @@ const CallPage = () => {
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
-  // Connect socket for signaling
+  // Determine if we are the caller or receiver:
+  // The caller is the one who initiated (the URL contains their targetUserId as the param.id).
+  // But both sides see the same URL pattern: /call/:id?type=...
+  // The receiver also navigates to /call/:callerId?type=... when they accept.
+  // So we can't easily deduce role. We'll rely on whether we received an 'incomingCall' before navigating.
+  // A simpler method: When the page loads, if we haven't already emitted an offer, we wait for an offer (receiver).
+  // But we need a flag. We'll use a ref `isCallerRef` set by the caller when they emit the callUser event.
+  // However, since the ChatPage emits callUser before navigating, we could just assume:
+  // - If this page is opened directly (caller), we need to wait for 'callAccepted' before starting media.
+  // - If opened via accepting an incoming call (receiver), we need to wait for 'webrtc_offer'.
+  // But we can't distinguish from URL alone. Let's store a flag in sessionStorage or use a query param.
+  // Simplest: Add query param `role=caller` when navigating from ChatPage's startCall,
+  // and no query param (or role=receiver) when accepting.
+  // We'll modify ChatPage to append `&role=caller` for the caller, and on accept we append nothing (receiver).
+
+  // So in ChatPage: startCall -> navigate(`/call/${targetUserId}?type=${type}&role=caller`)
+  // acceptCall -> navigate(`/call/${incomingCall.from}?type=${incomingCall.callType}`) (no role)
+
+  // Then in CallPage we can check searchParams.get("role").
+
+  const role = searchParams.get("role") || "receiver"; // "caller" or "receiver"
+
+  // Connect socket
   useEffect(() => {
     if (!authUser) return;
     const newSocket = io(BACKEND_URL, { withCredentials: true });
@@ -50,11 +72,19 @@ const CallPage = () => {
     };
   }, [authUser]);
 
-  // Setup media and PeerConnection as caller
+  // Cleanup on unmount
   useEffect(() => {
-    if (!socket || !authUser || !targetUserId) return;
+    return () => {
+      if (peerConnection) peerConnection.close();
+      if (localStream) localStream.getTracks().forEach(track => track.stop());
+    };
+  }, [peerConnection, localStream]);
 
-    const startCall = async () => {
+  // For CALLER: Wait for callAccepted, then start media / create offer
+  useEffect(() => {
+    if (!socket || !authUser || !targetUserId || role !== "caller") return;
+
+    const handleCallAccepted = async () => {
       try {
         const constraints = {
           audio: true,
@@ -99,48 +129,12 @@ const CallPage = () => {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socket.emit("webrtc_offer", { to: targetUserId, offer });
+        setCallStatus("connecting");
       } catch (err) {
         console.error("Media error:", err);
         toast.error("Could not access camera/microphone");
         navigate("/home");
       }
-    };
-
-    startCall();
-  }, [socket, authUser, targetUserId, callType]);
-
-  // Handle incoming signaling (for receiver side)
-  useEffect(() => {
-    if (!socket || !peerConnection) return;
-
-    const handleAnswer = async ({ from, answer }) => {
-      if (from !== targetUserId) return;
-      try {
-        await peerConnection.setRemoteDescription(
-          new RTCSessionDescription(answer)
-        );
-      } catch (err) {
-        console.error("Error setting remote answer:", err);
-      }
-    };
-
-    const handleOffer = async ({ from, offer }) => {
-      if (from !== targetUserId) return;
-      try {
-        await peerConnection.setRemoteDescription(
-          new RTCSessionDescription(offer)
-        );
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        socket.emit("webrtc_answer", { to: targetUserId, answer });
-      } catch (err) {
-        console.error("Error handling offer:", err);
-      }
-    };
-
-    const handleIceCandidate = ({ from, candidate }) => {
-      if (from !== targetUserId) return;
-      peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     };
 
     const handleCallDeclined = () => {
@@ -155,18 +149,124 @@ const CallPage = () => {
       setTimeout(() => navigate("/home"), 2000);
     };
 
-    socket.on("webrtc_answer", handleAnswer);
-    socket.on("webrtc_offer", handleOffer);
-    socket.on("webrtc_ice_candidate", handleIceCandidate);
+    socket.on("callAccepted", handleCallAccepted);
     socket.on("callDeclined", handleCallDeclined);
     socket.on("callEnded", handleCallEnded);
 
     return () => {
-      socket.off("webrtc_answer", handleAnswer);
-      socket.off("webrtc_offer", handleOffer);
-      socket.off("webrtc_ice_candidate", handleIceCandidate);
+      socket.off("callAccepted", handleCallAccepted);
       socket.off("callDeclined", handleCallDeclined);
       socket.off("callEnded", handleCallEnded);
+    };
+  }, [socket, authUser, targetUserId, callType, role, navigate]);
+
+  // For RECEIVER: Wait for webrtc_offer after page mount
+  useEffect(() => {
+    if (!socket || role !== "receiver") return;
+
+    const startReceiver = async () => {
+      try {
+        const constraints = {
+          audio: true,
+          video: callType === "video",
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        setLocalStream(stream);
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+        const pc = new RTCPeerConnection(configuration);
+        setPeerConnection(pc);
+
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+        pc.ontrack = (event) => {
+          setRemoteStream(event.streams[0]);
+          if (remoteVideoRef.current)
+            remoteVideoRef.current.srcObject = event.streams[0];
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.emit("webrtc_ice_candidate", {
+              to: targetUserId,
+              candidate: event.candidate,
+            });
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === "connected") {
+            setCallStatus("connected");
+          } else if (
+            pc.connectionState === "disconnected" ||
+            pc.connectionState === "failed"
+          ) {
+            setCallStatus("ended");
+            toast.error("Call disconnected");
+          }
+        };
+
+        // Wait for the offer from the caller
+        socket.on("webrtc_offer", async ({ from, offer }) => {
+          if (from !== targetUserId) return;
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit("webrtc_answer", { to: targetUserId, answer });
+            setCallStatus("connecting");
+          } catch (err) {
+            console.error("Error handling offer:", err);
+          }
+        });
+
+        // Also handle call ended from the other side
+        const handleCallEnded = () => {
+          setCallStatus("ended");
+          toast("Call ended");
+          setTimeout(() => navigate("/home"), 2000);
+        };
+        socket.on("callEnded", handleCallEnded);
+
+        // Cleanup these listeners when component unmounts
+        return () => {
+          socket.off("webrtc_offer");
+          socket.off("callEnded", handleCallEnded);
+        };
+      } catch (err) {
+        console.error("Media error (receiver):", err);
+        toast.error("Could not access camera/microphone");
+        navigate("/home");
+      }
+    };
+
+    startReceiver();
+  }, [socket, role, targetUserId, callType, navigate]);
+
+  // Also handle answer and ICE candidates for both roles (caller will also need these)
+  useEffect(() => {
+    if (!socket || !peerConnection) return;
+
+    const handleAnswer = async ({ from, answer }) => {
+      if (from !== targetUserId) return;
+      try {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (err) {
+        console.error("Error setting remote answer:", err);
+      }
+    };
+
+    const handleIceCandidate = ({ from, candidate }) => {
+      if (from !== targetUserId) return;
+      peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    };
+
+    socket.on("webrtc_answer", handleAnswer);
+    socket.on("webrtc_ice_candidate", handleIceCandidate);
+
+    return () => {
+      socket.off("webrtc_answer", handleAnswer);
+      socket.off("webrtc_ice_candidate", handleIceCandidate);
     };
   }, [socket, peerConnection, targetUserId]);
 
@@ -204,22 +304,19 @@ const CallPage = () => {
     }
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (peerConnection) peerConnection.close();
-      if (localStream) localStream.getTracks().forEach(track => track.stop());
-    };
-  }, []);
-
   if (isLoading) return <div className="h-screen flex items-center justify-center">Loading...</div>;
 
   return (
     <div className="h-screen w-screen bg-black flex flex-col">
       {/* Status banner */}
-      {callStatus === "calling" && (
+      {callStatus === "ringing" && role === "caller" && (
         <div className="bg-yellow-600 text-white text-center py-2">
-          Calling...
+          Ringing...
+        </div>
+      )}
+      {callStatus === "connecting" && (
+        <div className="bg-blue-600 text-white text-center py-2">
+          Connecting...
         </div>
       )}
       {callStatus === "declined" && (
@@ -246,7 +343,7 @@ const CallPage = () => {
           ) : (
             <div className="text-white text-opacity-50 flex flex-col items-center">
               <User size={80} />
-              <p>Waiting for connection...</p>
+              <p>{callStatus === "ringing" ? "Waiting for answer..." : "Waiting for connection..."}</p>
             </div>
           )}
         </div>
