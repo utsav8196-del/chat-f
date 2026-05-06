@@ -22,7 +22,7 @@ const CallPage = () => {
   const { id: targetUserId } = useParams();
   const [searchParams] = useSearchParams();
   const callType = searchParams.get("type") || "video";
-  const role = searchParams.get("role") || "receiver";
+  const role = searchParams.get("role") || "receiver"; // "caller" or "receiver"
   const navigate = useNavigate();
   const { authUser, isLoading } = useAuthUser();
 
@@ -32,16 +32,19 @@ const CallPage = () => {
   const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
-  const [callStatus, setCallStatus] = useState("ringing");
+  const [callStatus, setCallStatus] = useState("ringing"); // ringing, connecting, connected, declined, ended
   const [mediaReady, setMediaReady] = useState(false);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const callAcceptedRef = useRef(false);   // ✅ track if call accepted
+  const socketRef = useRef(null);          // to access latest socket in callbacks
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
+  // Cleanup
   const cleanupCall = useCallback(() => {
     if (peerConnection) peerConnection.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
@@ -52,13 +55,14 @@ const CallPage = () => {
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // Connect socket and check for pending call acceptance
+  // Connect socket
   useEffect(() => {
     if (!authUser) return;
     const newSocket = io(BACKEND_URL, { withCredentials: true });
     setSocket(newSocket);
+    socketRef.current = newSocket;
 
-    // As soon as connected, ask server to resume call if already accepted
+    // On connect, check for pending accepted call (for caller)
     newSocket.on("connect", () => {
       newSocket.emit("checkPendingCall");
     });
@@ -75,20 +79,23 @@ const CallPage = () => {
     };
   }, [cleanupCall]);
 
-  // Attach streams to video elements
+  // Attach local stream after it's set
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
 
+  // Attach remote stream
   useEffect(() => {
     if (remoteStream && remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [remoteStream]);
 
-  // Enable media (must be from button click)
+  // ----------------------------------------------------------------
+  // Enable camera / microphone (must be called from button click)
+  // ----------------------------------------------------------------
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -98,65 +105,102 @@ const CallPage = () => {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setLocalStream(stream);
       setMediaReady(true);
-      return stream;
     } catch (err) {
       console.error("Camera/mic error:", err);
       toast.error("Camera or microphone access denied.");
       goHome();
-      throw err;
     }
   };
 
-  // Once media is ready and we have a socket, set up WebRTC for CALLER
+  // ----------------------------------------------------------------
+  // Listen for callAccepted (caller) and callDeclined (both)
+  // ----------------------------------------------------------------
   useEffect(() => {
-    if (!socket || !mediaReady || role !== "caller") return;
+    if (!socket) return;
 
-    const setupCaller = async () => {
-      try {
-        const stream = localStream;
-        if (!stream) return;
-
-        const pc = new RTCPeerConnection(configuration);
-        setPeerConnection(pc);
-
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-
-        pc.ontrack = (event) => {
-          setRemoteStream(event.streams[0]);
-        };
-
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            socket.emit("webrtc_ice_candidate", {
-              to: targetUserId,
-              candidate: event.candidate,
-            });
-          }
-        };
-
-        pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") setCallStatus("connected");
-          else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-            setCallStatus("ended");
-            toast.error("Call disconnected");
-            goHome();
-          }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit("webrtc_offer", { to: targetUserId, offer });
-        setCallStatus("connecting");
-      } catch (err) {
-        toast.error("Failed to start call");
-        goHome();
+    const handleCallAccepted = () => {
+      callAcceptedRef.current = true;
+      // If media is already ready, start call immediately
+      if (mediaReady) {
+        startCallerWebRTC();
       }
     };
 
-    setupCaller();
-  }, [socket, mediaReady, role, targetUserId, localStream, goHome]);
+    const handleCallDeclined = () => {
+      setCallStatus("declined");
+      toast("Call declined", { icon: "📵" });
+      setTimeout(goHome, 2000);
+    };
 
-  // RECEIVER: set up WebRTC when media is ready
+    socket.on("callAccepted", handleCallAccepted);
+    socket.on("callDeclined", handleCallDeclined);
+
+    return () => {
+      socket.off("callAccepted", handleCallAccepted);
+      socket.off("callDeclined", handleCallDeclined);
+    };
+  }, [socket, mediaReady]); // include mediaReady, but we'll use ref inside for safety
+
+  // ----------------------------------------------------------------
+  // Start WebRTC for the CALLER (only after accepted & media ready)
+  // ----------------------------------------------------------------
+  const startCallerWebRTC = useCallback(async () => {
+    const currentSocket = socketRef.current;
+    if (!currentSocket || !localStream) return;
+
+    try {
+      const pc = new RTCPeerConnection(configuration);
+      setPeerConnection(pc);
+
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+      pc.ontrack = (event) => {
+        setRemoteStream(event.streams[0]);
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          currentSocket.emit("webrtc_ice_candidate", {
+            to: targetUserId,
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setCallStatus("connected");
+        } else if (
+          pc.connectionState === "disconnected" ||
+          pc.connectionState === "failed"
+        ) {
+          setCallStatus("ended");
+          toast.error("Call disconnected");
+          goHome();
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      currentSocket.emit("webrtc_offer", { to: targetUserId, offer });
+      setCallStatus("connecting");
+    } catch (err) {
+      console.error("Caller WebRTC setup error:", err);
+      toast.error("Failed to set up call");
+      goHome();
+    }
+  }, [localStream, targetUserId, goHome]);
+
+  // When media becomes ready and caller already received callAccepted -> start
+  useEffect(() => {
+    if (mediaReady && role === "caller" && callAcceptedRef.current) {
+      startCallerWebRTC();
+    }
+  }, [mediaReady, role, startCallerWebRTC]);
+
+  // ----------------------------------------------------------------
+  // RECEIVER WebRTC setup (started when media is ready)
+  // ----------------------------------------------------------------
   useEffect(() => {
     if (!socket || !mediaReady || role !== "receiver") return;
 
@@ -184,8 +228,12 @@ const CallPage = () => {
         };
 
         pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") setCallStatus("connected");
-          else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+          if (pc.connectionState === "connected") {
+            setCallStatus("connected");
+          } else if (
+            pc.connectionState === "disconnected" ||
+            pc.connectionState === "failed"
+          ) {
             setCallStatus("ended");
             toast.error("Call disconnected");
             goHome();
@@ -194,6 +242,7 @@ const CallPage = () => {
 
         setCallStatus("connecting");
       } catch (err) {
+        console.error("Receiver WebRTC setup error:", err);
         toast.error("Failed to set up call");
         goHome();
       }
@@ -202,7 +251,7 @@ const CallPage = () => {
     setupReceiver();
   }, [socket, mediaReady, role, targetUserId, localStream, goHome]);
 
-  // RECEIVER: listen for offer and call end
+  // RECEIVER: handle incoming offer & call ended
   useEffect(() => {
     if (!socket || !peerConnection || role !== "receiver") return;
 
@@ -235,7 +284,7 @@ const CallPage = () => {
     };
   }, [socket, peerConnection, role, targetUserId, goHome]);
 
-  // Common: handle answer and ICE for both roles
+  // Common: handle answer & ICE for both roles
   useEffect(() => {
     if (!socket || !peerConnection) return;
 
@@ -262,31 +311,6 @@ const CallPage = () => {
     };
   }, [socket, peerConnection, targetUserId]);
 
-  // Listen for callAccepted (for caller) and callDeclined
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleCallAccepted = () => {
-      // Media already enabled, call will proceed when the offer/answer exchange starts.
-      // The actual connection will be triggered by the caller setup (already ran on mediaReady)
-      // So no extra action needed, mediaReady already triggered setup.
-    };
-
-    const handleCallDeclined = () => {
-      setCallStatus("declined");
-      toast("Call declined", { icon: "📵" });
-      setTimeout(goHome, 2000);
-    };
-
-    socket.on("callAccepted", handleCallAccepted);
-    socket.on("callDeclined", handleCallDeclined);
-
-    return () => {
-      socket.off("callAccepted", handleCallAccepted);
-      socket.off("callDeclined", handleCallDeclined);
-    };
-  }, [socket, goHome]);
-
   // Call controls
   const toggleMute = () => {
     if (localStream) {
@@ -303,7 +327,9 @@ const CallPage = () => {
   };
 
   const hangUp = () => {
-    if (socket && targetUserId) socket.emit("callEnd", { to: targetUserId });
+    if (socket && targetUserId) {
+      socket.emit("callEnd", { to: targetUserId });
+    }
     goHome();
   };
 
@@ -358,11 +384,17 @@ const CallPage = () => {
       </div>
 
       <div className="bg-gray-800 py-4 px-6 flex justify-center gap-6">
-        <button onClick={toggleMute} className={`p-4 rounded-full ${isMuted ? "bg-red-600" : "bg-gray-600"} text-white`}>
+        <button
+          onClick={toggleMute}
+          className={`p-4 rounded-full ${isMuted ? "bg-red-600" : "bg-gray-600"} text-white`}
+        >
           {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
         </button>
         {callType === "video" && (
-          <button onClick={toggleVideo} className={`p-4 rounded-full ${isVideoOff ? "bg-red-600" : "bg-gray-600"} text-white`}>
+          <button
+            onClick={toggleVideo}
+            className={`p-4 rounded-full ${isVideoOff ? "bg-red-600" : "bg-gray-600"} text-white`}
+          >
             {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
           </button>
         )}
