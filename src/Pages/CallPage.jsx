@@ -15,7 +15,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 
-// STUN + free TURN server (fallback when STUN alone fails)
+// STUN + free TURN (to handle NATs)
 const configuration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -53,7 +53,7 @@ const CallPage = () => {
   const pcRef = useRef(null);
   const streamRef = useRef(null);
   const pendingOfferRef = useRef(null);
-  const mediaReadyRef = useRef(false);   // keep a ref copy for callbacks
+  const mediaReadyRef = useRef(false);   // used inside callbacks
   const callAcceptedRef = useRef(false);
   const timeoutRef = useRef(null);
 
@@ -80,14 +80,14 @@ const CallPage = () => {
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // ----- SOCKET -----
+  // ----- SOCKET CONNECTION -----
   useEffect(() => {
     if (!authUser) return;
     const socket = io(BACKEND_URL, { withCredentials: true });
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("checkPendingCall");
+      socket.emit("checkPendingCall"); // resume call if receiver already accepted
     });
 
     return () => {
@@ -95,11 +95,12 @@ const CallPage = () => {
     };
   }, [authUser]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => cleanupCall();
   }, [cleanupCall]);
 
-  // ----- ATTACH STREAMS -----
+  // ----- ATTACH STREAMS TO VIDEO ELEMENTS -----
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
@@ -112,7 +113,7 @@ const CallPage = () => {
     }
   }, [remoteStream]);
 
-  // ----- ENABLE MEDIA (user click) -----
+  // ----- ENABLE CAMERA / MIC (must be a user click) -----
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -146,15 +147,14 @@ const CallPage = () => {
     };
   }, [callPhase, connectionFailed]);
 
-  // ======================= CALLER =======================
-  // Always listen for callAccepted (ref‑based media check)
+  // ===================== CALLER =====================
+  // Listen for callAccepted (or receive it via checkPendingCall)
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "caller") return;
 
     const handleCallAccepted = () => {
       callAcceptedRef.current = true;
-      // if media already ready, start now
       if (mediaReadyRef.current) {
         startCallerWebRTC(socket);
       } else {
@@ -170,11 +170,12 @@ const CallPage = () => {
 
     socket.on("callAccepted", handleCallAccepted);
     socket.on("callDeclined", handleCallDeclined);
+
     return () => {
       socket.off("callAccepted", handleCallAccepted);
       socket.off("callDeclined", handleCallDeclined);
     };
-  }, [role, goHome]); // mediaReady is read via ref, no dependency
+  }, [role, goHome]); // mediaReadyRef is used, so no dependency on state
 
   // If media becomes ready after callAccepted
   useEffect(() => {
@@ -224,12 +225,12 @@ const CallPage = () => {
     }
   }, [targetUserId, goHome]);
 
-  // ======================= RECEIVER =======================
-  // Create PC once media is ready (only once)
+  // ===================== RECEIVER =====================
+  // Create PC once media is ready
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "receiver" || !mediaReady) return;
-    if (pcRef.current) return;
+    if (pcRef.current) return; // already created
 
     const stream = streamRef.current;
     if (!stream) return;
@@ -260,7 +261,7 @@ const CallPage = () => {
 
     setCallPhase("connecting");
 
-    // Process any stored early offer
+    // Process early stored offer
     if (pendingOfferRef.current) {
       const offer = pendingOfferRef.current;
       pendingOfferRef.current = null;
@@ -277,7 +278,7 @@ const CallPage = () => {
         });
     }
 
-    // Listen for new offers (no signalingState check)
+    // Listen for new offers
     const handleOffer = async ({ from, offer }) => {
       if (from !== targetUserId) return;
       try {
@@ -319,7 +320,7 @@ const CallPage = () => {
     return () => socket.off("webrtc_offer", storeOffer);
   }, [role, targetUserId]);
 
-  // ======================= COMMON ICE & ANSWER =======================
+  // ===================== COMMON: ANSWER & ICE =====================
   useEffect(() => {
     const socket = socketRef.current;
     const pc = pcRef.current;
@@ -350,7 +351,7 @@ const CallPage = () => {
       socket.off("webrtc_answer", handleAnswer);
       socket.off("webrtc_ice_candidate", handleIceCandidate);
     };
-  }, [targetUserId]); // pc is read via ref
+  }, [targetUserId]);
 
   // ----- CONTROLS -----
   const toggleMute = () => {
@@ -424,10 +425,7 @@ const CallPage = () => {
               <User size={80} />
               <p>{callPhase === "ringing" ? "Waiting for answer..." : "Waiting for connection..."}</p>
               {connectionFailed && (
-                <button
-                  onClick={goHome}
-                  className="mt-4 btn btn-outline btn-sm text-white"
-                >
+                <button onClick={goHome} className="mt-4 btn btn-outline btn-sm text-white">
                   Go back to chat
                 </button>
               )}
