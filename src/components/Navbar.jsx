@@ -90,7 +90,7 @@ const Navbar = () => {
 
                         <div className="avatar">                        
                             <Link to={"/profile"}>
-                                <button className="btn btn-ghost btn-circle p-[0.5px]">
+                                <button className="btn btn-ghost btn-circle p-[0.5px] rounded-full">
                                     <img src={authUser?.profilePic} alt="User Avatar" rel="noreferrer" />
                                 </button>
                             </Link>
