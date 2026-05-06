@@ -22,29 +22,32 @@ const CallPage = () => {
   const { id: targetUserId } = useParams();
   const [searchParams] = useSearchParams();
   const callType = searchParams.get("type") || "video";
-  const role = searchParams.get("role") || "receiver";
+  const role = searchParams.get("role") || "receiver"; // "caller" or "receiver"
   const navigate = useNavigate();
   const { authUser, isLoading } = useAuthUser();
 
+  // ---------- STATE ----------
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
-  const [callPhase, setCallPhase] = useState("idle"); // idle | ringing | accepted | connecting | connected | ended
+  const [callPhase, setCallPhase] = useState("idle"); // idle → ringing → accepted → connecting → connected → ended
   const [mediaReady, setMediaReady] = useState(false);
 
+  // ---------- REFS ----------
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
-  const socketRef = useRef(null);
-  const pcRef = useRef(null);           // single RTCPeerConnection
-  const streamRef = useRef(null);       // to hold latest stream in callbacks
-  const offerReceivedRef = useRef(null); // store early offer for receiver
+  const socketRef = useRef(null);            // socket instance
+  const pcRef = useRef(null);                // single RTCPeerConnection
+  const streamRef = useRef(null);            // local MediaStream
+  const pendingOfferRef = useRef(null);      // buffer early offer for receiver
+  const callAcceptedRef = useRef(false);     // for caller, avoid race
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
-  // Cleanup
+  // ---------- CLEANUP ----------
   const cleanupCall = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.close();
@@ -62,14 +65,14 @@ const CallPage = () => {
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // Connect socket
+  // ---------- SOCKET CONNECTION ----------
   useEffect(() => {
     if (!authUser) return;
     const socket = io(BACKEND_URL, { withCredentials: true });
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("checkPendingCall");
+      socket.emit("checkPendingCall"); // resume if receiver already accepted
     });
 
     return () => {
@@ -79,12 +82,10 @@ const CallPage = () => {
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      cleanupCall();
-    };
+    return () => cleanupCall();
   }, [cleanupCall]);
 
-  // Attach streams when they become available
+  // ---------- ATTACH STREAMS TO VIDEO ELEMENTS ----------
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
@@ -97,7 +98,7 @@ const CallPage = () => {
     }
   }, [remoteStream]);
 
-  // Enable media (must be called from button click)
+  // ---------- ENABLE CAMERA / MIC (must be user click) ----------
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -108,7 +109,6 @@ const CallPage = () => {
       streamRef.current = stream;
       setLocalStream(stream);
       setMediaReady(true);
-      return stream;
     } catch (err) {
       console.error("Camera/mic error:", err);
       toast.error("Camera or microphone access denied.");
@@ -116,19 +116,18 @@ const CallPage = () => {
     }
   };
 
-  // --- CALLER FLOW ---
-  // Wait for callAccepted (which may arrive via checkPendingCall on connect)
+  // ========== CALLER FLOW ==========
+  // Listen for callAccepted (or checkPendingCall on connect)
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "caller") return;
 
     const handleCallAccepted = () => {
-      // If we already have media, start call; otherwise wait for mediaReady
+      callAcceptedRef.current = true;
       if (mediaReady) {
-        startMediaAndOffer(socket);
+        startCallerWebRTC(socket);
       } else {
-        // media not ready yet – will start when mediaReady becomes true
-        setCallPhase("accepted");
+        setCallPhase("accepted"); // wait for media
       }
     };
 
@@ -145,16 +144,16 @@ const CallPage = () => {
       socket.off("callAccepted", handleCallAccepted);
       socket.off("callDeclined", handleCallDeclined);
     };
-  }, [role, mediaReady, goHome]); // include mediaReady to ensure correct closure
+  }, [role, mediaReady, goHome]);
 
-  // When media becomes ready and caller already accepted, start
+  // If media becomes ready after callAccepted
   useEffect(() => {
-    if (role === "caller" && mediaReady && callPhase === "accepted") {
-      startMediaAndOffer(socketRef.current);
+    if (role === "caller" && mediaReady && callAcceptedRef.current) {
+      startCallerWebRTC(socketRef.current);
     }
-  }, [mediaReady, role, callPhase]);
+  }, [mediaReady, role]);
 
-  const startMediaAndOffer = useCallback(async (socket) => {
+  const startCallerWebRTC = useCallback(async (socket) => {
     if (!socket || pcRef.current) return; // already created
     try {
       const stream = streamRef.current;
@@ -178,7 +177,10 @@ const CallPage = () => {
 
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "connected") setCallPhase("connected");
-        else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+        else if (
+          pc.connectionState === "disconnected" ||
+          pc.connectionState === "failed"
+        ) {
           setCallPhase("ended");
           toast.error("Call disconnected");
           goHome();
@@ -196,14 +198,12 @@ const CallPage = () => {
     }
   }, [targetUserId, goHome]);
 
-  // --- RECEIVER FLOW ---
-  // Start WebRTC creation as soon as media is ready, regardless of offer
+  // ========== RECEIVER FLOW ==========
+  // Create PC as soon as media is ready (only once)
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || role !== "receiver" || !mediaReady) return;
-
-    // Create PC only once
-    if (pcRef.current) return;
+    if (pcRef.current) return; // already created
 
     const stream = streamRef.current;
     if (!stream) return;
@@ -226,7 +226,10 @@ const CallPage = () => {
 
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") setCallPhase("connected");
-      else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+      else if (
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "failed"
+      ) {
         setCallPhase("ended");
         toast.error("Call disconnected");
         goHome();
@@ -235,10 +238,10 @@ const CallPage = () => {
 
     setCallPhase("connecting");
 
-    // If we already received an offer (was stored), handle it now
-    if (offerReceivedRef.current) {
-      const offer = offerReceivedRef.current;
-      offerReceivedRef.current = null;
+    // If an offer arrived before PC was ready, handle it now
+    if (pendingOfferRef.current) {
+      const offer = pendingOfferRef.current;
+      pendingOfferRef.current = null;
       pc.setRemoteDescription(new RTCSessionDescription(offer))
         .then(() => pc.createAnswer())
         .then((answer) => {
@@ -252,10 +255,10 @@ const CallPage = () => {
         });
     }
 
-    // Listen for offer that may come after PC is ready
+    // Listen for new offers
     const handleOffer = async ({ from, offer }) => {
       if (from !== targetUserId) return;
-      if (pc.signalingState !== "stable") return; // already handling
+      if (pc.signalingState !== "stable") return; // ignore if already processing
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
@@ -280,7 +283,7 @@ const CallPage = () => {
     return () => {
       socket.off("webrtc_offer", handleOffer);
       socket.off("callEnded", handleCallEnded);
-      // Do NOT close PC here – cleanup happens on unmount
+      // Do NOT close PC here – cleanup on unmount
     };
   }, [role, mediaReady, targetUserId, goHome]);
 
@@ -290,16 +293,13 @@ const CallPage = () => {
     if (!socket || role !== "receiver") return;
 
     const storeOffer = ({ from, offer }) => {
-      if (from === targetUserId) offerReceivedRef.current = offer;
+      if (from === targetUserId) pendingOfferRef.current = offer;
     };
     socket.on("webrtc_offer", storeOffer);
-
-    return () => {
-      socket.off("webrtc_offer", storeOffer);
-    };
+    return () => socket.off("webrtc_offer", storeOffer);
   }, [role, targetUserId]);
 
-  // Common: handle answer and ICE candidates (both roles)
+  // ========== COMMON: ANSWER & ICE HANDLING ==========
   useEffect(() => {
     const socket = socketRef.current;
     const pc = pcRef.current;
@@ -330,9 +330,9 @@ const CallPage = () => {
       socket.off("webrtc_answer", handleAnswer);
       socket.off("webrtc_ice_candidate", handleIceCandidate);
     };
-  }, [targetUserId]); // pc is not needed because we use pcRef.current inside
+  }, [targetUserId]); // pc is accessed via pcRef.current, safe
 
-  // Call controls
+  // ---------- CONTROLS ----------
   const toggleMute = () => {
     if (streamRef.current) {
       streamRef.current.getAudioTracks().forEach((track) => (track.enabled = !track.enabled));
@@ -358,6 +358,7 @@ const CallPage = () => {
 
   return (
     <div className="h-screen w-screen bg-black flex flex-col">
+      {/* STATUS BANNER */}
       {callPhase === "ringing" && role === "caller" && (
         <div className="bg-yellow-600 text-white text-center py-2">Ringing...</div>
       )}
@@ -371,6 +372,7 @@ const CallPage = () => {
         <div className="bg-red-600 text-white text-center py-2">Call ended</div>
       )}
 
+      {/* CAMERA PERMISSION OVERLAY */}
       {!mediaReady && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black bg-opacity-80">
           <Camera size={64} className="text-white mb-4" />
@@ -381,10 +383,17 @@ const CallPage = () => {
         </div>
       )}
 
+      {/* VIDEO CONTAINERS */}
       <div className="flex-1 flex flex-col md:flex-row">
+        {/* Remote video (fullscreen) */}
         <div className="flex-1 bg-gray-900 flex items-center justify-center relative">
           {remoteStream ? (
-            <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              className="w-full h-full object-cover"
+            />
           ) : (
             <div className="text-white text-opacity-50 flex flex-col items-center">
               <User size={80} />
@@ -393,9 +402,16 @@ const CallPage = () => {
           )}
         </div>
 
+        {/* Local video (PiP) */}
         <div className="absolute bottom-24 right-4 w-32 h-48 md:w-48 md:h-64 bg-gray-700 rounded-lg overflow-hidden shadow-lg z-10">
           {callType === "video" && localStream ? (
-            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
           ) : (
             <div className="flex items-center justify-center h-full text-white">
               <User size={40} />
@@ -404,6 +420,7 @@ const CallPage = () => {
         </div>
       </div>
 
+      {/* CONTROL BAR */}
       <div className="bg-gray-800 py-4 px-6 flex justify-center gap-6">
         <button
           onClick={toggleMute}
