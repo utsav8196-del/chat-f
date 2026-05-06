@@ -33,7 +33,7 @@ const CallPage = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === "voice");
   const [callStatus, setCallStatus] = useState("ringing");
-  const [mediaReady, setMediaReady] = useState(false); // true after user enables media
+  const [mediaReady, setMediaReady] = useState(false);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -42,7 +42,6 @@ const CallPage = () => {
     ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
-  // Cleanup
   const cleanupCall = useCallback(() => {
     if (peerConnection) peerConnection.close();
     if (localStream) localStream.getTracks().forEach((track) => track.stop());
@@ -53,11 +52,17 @@ const CallPage = () => {
     navigate("/home");
   }, [cleanupCall, navigate]);
 
-  // Connect to signaling socket
+  // Connect socket and check for pending call acceptance
   useEffect(() => {
     if (!authUser) return;
     const newSocket = io(BACKEND_URL, { withCredentials: true });
     setSocket(newSocket);
+
+    // As soon as connected, ask server to resume call if already accepted
+    newSocket.on("connect", () => {
+      newSocket.emit("checkPendingCall");
+    });
+
     return () => {
       newSocket.disconnect();
     };
@@ -70,23 +75,20 @@ const CallPage = () => {
     };
   }, [cleanupCall]);
 
-  // Attach local stream after it's set and video element is present
+  // Attach streams to video elements
   useEffect(() => {
     if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
 
-  // Attach remote stream
   useEffect(() => {
     if (remoteStream && remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [remoteStream]);
 
-  // ----------------------------------------------------------------
-  // Enable camera / microphone (must be called from a button click)
-  // ----------------------------------------------------------------
+  // Enable media (must be from button click)
   const enableMedia = async () => {
     try {
       const constraints = {
@@ -99,21 +101,19 @@ const CallPage = () => {
       return stream;
     } catch (err) {
       console.error("Camera/mic error:", err);
-      toast.error("Camera or microphone access denied. Check permissions.");
+      toast.error("Camera or microphone access denied.");
       goHome();
       throw err;
     }
   };
 
-  // ----------------------------------------------------------------
-  // Setup WebRTC after media is ready for CALLER
-  // ----------------------------------------------------------------
+  // Once media is ready and we have a socket, set up WebRTC for CALLER
   useEffect(() => {
     if (!socket || !mediaReady || role !== "caller") return;
 
     const setupCaller = async () => {
       try {
-        const stream = localStream; // already obtained
+        const stream = localStream;
         if (!stream) return;
 
         const pc = new RTCPeerConnection(configuration);
@@ -135,12 +135,8 @@ const CallPage = () => {
         };
 
         pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") {
-            setCallStatus("connected");
-          } else if (
-            pc.connectionState === "disconnected" ||
-            pc.connectionState === "failed"
-          ) {
+          if (pc.connectionState === "connected") setCallStatus("connected");
+          else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
             setCallStatus("ended");
             toast.error("Call disconnected");
             goHome();
@@ -160,43 +156,7 @@ const CallPage = () => {
     setupCaller();
   }, [socket, mediaReady, role, targetUserId, localStream, goHome]);
 
-  // ----------------------------------------------------------------
-  // For CALLER – listen for acceptance / decline
-  // ----------------------------------------------------------------
-  useEffect(() => {
-    if (!socket || role !== "caller") return;
-
-    const handleCallAccepted = () => {
-      // Media is already enabled, so just wait for the offer/answer exchange
-      // No extra action needed here, as the media request was already done
-    };
-
-    const handleCallDeclined = () => {
-      setCallStatus("declined");
-      toast("Call declined", { icon: "📵" });
-      setTimeout(goHome, 2000);
-    };
-
-    const handleCallEnded = () => {
-      setCallStatus("ended");
-      toast("Call ended");
-      setTimeout(goHome, 2000);
-    };
-
-    socket.on("callAccepted", handleCallAccepted);
-    socket.on("callDeclined", handleCallDeclined);
-    socket.on("callEnded", handleCallEnded);
-
-    return () => {
-      socket.off("callAccepted", handleCallAccepted);
-      socket.off("callDeclined", handleCallDeclined);
-      socket.off("callEnded", handleCallEnded);
-    };
-  }, [socket, role, goHome]);
-
-  // ----------------------------------------------------------------
-  // RECEIVER – setup after media is ready
-  // ----------------------------------------------------------------
+  // RECEIVER: set up WebRTC when media is ready
   useEffect(() => {
     if (!socket || !mediaReady || role !== "receiver") return;
 
@@ -224,12 +184,8 @@ const CallPage = () => {
         };
 
         pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") {
-            setCallStatus("connected");
-          } else if (
-            pc.connectionState === "disconnected" ||
-            pc.connectionState === "failed"
-          ) {
+          if (pc.connectionState === "connected") setCallStatus("connected");
+          else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
             setCallStatus("ended");
             toast.error("Call disconnected");
             goHome();
@@ -246,9 +202,7 @@ const CallPage = () => {
     setupReceiver();
   }, [socket, mediaReady, role, targetUserId, localStream, goHome]);
 
-  // ----------------------------------------------------------------
-  // RECEIVER – handle incoming offer & call ended
-  // ----------------------------------------------------------------
+  // RECEIVER: listen for offer and call end
   useEffect(() => {
     if (!socket || !peerConnection || role !== "receiver") return;
 
@@ -281,9 +235,7 @@ const CallPage = () => {
     };
   }, [socket, peerConnection, role, targetUserId, goHome]);
 
-  // ----------------------------------------------------------------
-  // Common WebRTC events (answer and ICE) for both roles
-  // ----------------------------------------------------------------
+  // Common: handle answer and ICE for both roles
   useEffect(() => {
     if (!socket || !peerConnection) return;
 
@@ -310,7 +262,32 @@ const CallPage = () => {
     };
   }, [socket, peerConnection, targetUserId]);
 
-  // Controls
+  // Listen for callAccepted (for caller) and callDeclined
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleCallAccepted = () => {
+      // Media already enabled, call will proceed when the offer/answer exchange starts.
+      // The actual connection will be triggered by the caller setup (already ran on mediaReady)
+      // So no extra action needed, mediaReady already triggered setup.
+    };
+
+    const handleCallDeclined = () => {
+      setCallStatus("declined");
+      toast("Call declined", { icon: "📵" });
+      setTimeout(goHome, 2000);
+    };
+
+    socket.on("callAccepted", handleCallAccepted);
+    socket.on("callDeclined", handleCallDeclined);
+
+    return () => {
+      socket.off("callAccepted", handleCallAccepted);
+      socket.off("callDeclined", handleCallDeclined);
+    };
+  }, [socket, goHome]);
+
+  // Call controls
   const toggleMute = () => {
     if (localStream) {
       localStream.getAudioTracks().forEach((track) => (track.enabled = !track.enabled));
@@ -326,9 +303,7 @@ const CallPage = () => {
   };
 
   const hangUp = () => {
-    if (socket && targetUserId) {
-      socket.emit("callEnd", { to: targetUserId });
-    }
+    if (socket && targetUserId) socket.emit("callEnd", { to: targetUserId });
     goHome();
   };
 
@@ -336,7 +311,6 @@ const CallPage = () => {
 
   return (
     <div className="h-screen w-screen bg-black flex flex-col">
-      {/* Status banner */}
       {callStatus === "ringing" && role === "caller" && (
         <div className="bg-yellow-600 text-white text-center py-2">Ringing...</div>
       )}
@@ -354,25 +328,16 @@ const CallPage = () => {
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black bg-opacity-80">
           <Camera size={64} className="text-white mb-4" />
           <p className="text-white text-lg mb-6">Camera and microphone are off</p>
-          <button
-            onClick={enableMedia}
-            className="btn btn-primary btn-lg gap-2"
-          >
+          <button onClick={enableMedia} className="btn btn-primary btn-lg gap-2">
             <Camera size={20} /> Turn on Camera
           </button>
         </div>
       )}
 
       <div className="flex-1 flex flex-col md:flex-row">
-        {/* Remote video (large) */}
         <div className="flex-1 bg-gray-900 flex items-center justify-center relative">
           {remoteStream ? (
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="w-full h-full object-cover"
-            />
+            <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
           ) : (
             <div className="text-white text-opacity-50 flex flex-col items-center">
               <User size={80} />
@@ -381,16 +346,9 @@ const CallPage = () => {
           )}
         </div>
 
-        {/* Local video (PiP) */}
         <div className="absolute bottom-24 right-4 w-32 h-48 md:w-48 md:h-64 bg-gray-700 rounded-lg overflow-hidden shadow-lg z-10">
           {callType === "video" && localStream ? (
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
+            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
           ) : (
             <div className="flex items-center justify-center h-full text-white">
               <User size={40} />
@@ -399,28 +357,16 @@ const CallPage = () => {
         </div>
       </div>
 
-      {/* Control bar */}
       <div className="bg-gray-800 py-4 px-6 flex justify-center gap-6">
-        <button
-          onClick={toggleMute}
-          className={`p-4 rounded-full ${isMuted ? "bg-red-600" : "bg-gray-600"} text-white`}
-        >
+        <button onClick={toggleMute} className={`p-4 rounded-full ${isMuted ? "bg-red-600" : "bg-gray-600"} text-white`}>
           {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
         </button>
-
         {callType === "video" && (
-          <button
-            onClick={toggleVideo}
-            className={`p-4 rounded-full ${isVideoOff ? "bg-red-600" : "bg-gray-600"} text-white`}
-          >
+          <button onClick={toggleVideo} className={`p-4 rounded-full ${isVideoOff ? "bg-red-600" : "bg-gray-600"} text-white`}>
             {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
           </button>
         )}
-
-        <button
-          onClick={hangUp}
-          className="p-4 rounded-full bg-red-600 text-white"
-        >
+        <button onClick={hangUp} className="p-4 rounded-full bg-red-600 text-white">
           <PhoneOff size={24} />
         </button>
       </div>
