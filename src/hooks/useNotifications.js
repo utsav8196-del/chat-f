@@ -25,7 +25,7 @@ const useNotifications = () => {
     // Request permission on first socket connect (user gesture may be needed later, but we try)
     requestNotificationPermission();
 
-    const audio = new Audio("/mixkit-software-interface-remove-2576"); // Add your ringtone file to /public
+    const audio = new Audio("/notification.mp3"); // Add your ringtone file to /public
     ringtoneRef.current = audio;
 
     const showNotification = (title, options = {}) => {
@@ -67,7 +67,7 @@ const useNotifications = () => {
           body: message.text,
         });
         // Play a short sound (not loop)
-        const msgSound = new Audio("/mixkit-software-interface-remove-2576");
+        const msgSound = new Audio("/notification.mp3");
         msgSound.play().catch(() => {});
       }
     });
