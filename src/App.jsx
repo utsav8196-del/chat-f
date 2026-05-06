@@ -9,6 +9,7 @@ import OnboardingPage from './Pages/OnboardingPage'
 import CallPage from './Pages/CallPage'            // <-- import
 import ChatPage from './Pages/ChatPage'
 import NotificationsPage from './Pages/NotificationsPage'
+import useNotifications from "./hooks/useNotifications";
 
 import PageLoader from './components/PageLoader'
 import Layout from './components/Layout'
@@ -22,6 +23,8 @@ import LandingPage from './Pages/LandingPage'
 const App = () => {
   const { isLoading, authUser } = useAuthUser();
   const { theme } = useThemeStore();
+
+  useNotifications();
 
   const isAuthenticated = Boolean(authUser);
   const isOnboarded = authUser?.isOnboarded;
