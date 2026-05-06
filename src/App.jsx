@@ -1,4 +1,4 @@
-
+// App.jsx
 import React from 'react'
 import { Toaster } from 'react-hot-toast'
 import { Routes, Route, Navigate } from 'react-router'
@@ -6,7 +6,7 @@ import HomePage from './Pages/HomePage'
 import LoginPage from './Pages/LoginPage'
 import SignUpPage from './Pages/SignUpPage'
 import OnboardingPage from './Pages/OnboardingPage'
-import CallPage from './Pages/CallPage'
+import CallPage from './Pages/CallPage'            // <-- import
 import ChatPage from './Pages/ChatPage'
 import NotificationsPage from './Pages/NotificationsPage'
 
@@ -61,7 +61,7 @@ const App = () => {
           )
         } />
 
-        {/* Other protected routes */}
+        {/* Chat */}
         <Route path="/chat/:id" element={
           isAuthenticated && isOnboarded ? (
             <Layout showSidebar={false}>
@@ -72,6 +72,7 @@ const App = () => {
           )
         } />
 
+        {/* Call page */}
         <Route path="/call/:id" element={
           isAuthenticated && isOnboarded ? (
             <CallPage />
@@ -80,6 +81,7 @@ const App = () => {
           )
         } />
 
+        {/* Other protected routes */}
         <Route path="/notifications" element={
           isAuthenticated && isOnboarded ? (
             <Layout showSidebar={true}>

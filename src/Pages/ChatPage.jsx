@@ -1,25 +1,36 @@
 // Pages/ChatPage.jsx
 import { useEffect, useState, useRef } from "react";
-import { useParams, Link } from "react-router";   // ✅ correct import
+import { useParams, Link, useNavigate } from "react-router";
 import useAuthUser from "../hooks/useAuthUser";
 import { axiosInstance } from "../lib/axios";
 import { io } from "socket.io-client";
 import toast from "react-hot-toast";
-import { Send, User, Phone, Video, ArrowLeft } from "lucide-react";
+import {
+  Send,
+  User,
+  Phone,
+  Video,
+  PhoneOff,
+  ArrowLeft,
+} from "lucide-react";
 
 const ChatPage = () => {
   const { id: targetUserId } = useParams();
   const { authUser, isLoading } = useAuthUser();
+  const navigate = useNavigate();
+
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [typingUser, setTypingUser] = useState(null);
+  const [incomingCall, setIncomingCall] = useState(null); // { from, fromName, callType }
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
 
   const isOnline = onlineUsers.includes(targetUserId);
+
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
-    ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")   // remove /api suffix for Socket.IO
+    ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
     : "http://localhost:8000";
 
   // Fetch chat history
@@ -37,12 +48,12 @@ const ChatPage = () => {
     fetchMessages();
   }, [authUser, targetUserId]);
 
-  // Connect Socket.IO (cookies sent automatically)
+  // Connect Socket.IO
   useEffect(() => {
     if (!authUser) return;
 
     const socket = io(BACKEND_URL, {
-      withCredentials: true,   // essential for sending httpOnly cookies
+      withCredentials: true,
     });
     socketRef.current = socket;
 
@@ -69,6 +80,11 @@ const ChatPage = () => {
 
     socket.on("userStopTyping", (userId) => {
       if (userId === targetUserId) setTypingUser(null);
+    });
+
+    // Incoming call listener
+    socket.on("incomingCall", (data) => {
+      setIncomingCall(data);
     });
 
     socket.on("connect_error", (err) => {
@@ -109,9 +125,24 @@ const ChatPage = () => {
     }, 2000);
   };
 
-  // Placeholder for future video call
-  const startVideoCall = () => {
-    toast.success("Video call feature coming soon!");
+  // Start a call (video or voice)
+  const startCall = (type) => {
+    navigate(`/call/${targetUserId}?type=${type}`);
+  };
+
+  // Accept incoming call
+  const acceptCall = () => {
+    if (!incomingCall || !socketRef.current) return;
+    socketRef.current.emit("acceptCall", { to: incomingCall.from });
+    navigate(`/call/${incomingCall.from}?type=${incomingCall.callType}`);
+    setIncomingCall(null);
+  };
+
+  // Decline incoming call
+  const declineCall = () => {
+    if (!incomingCall || !socketRef.current) return;
+    socketRef.current.emit("declineCall", { to: incomingCall.from });
+    setIncomingCall(null);
   };
 
   if (isLoading) return <div className="h-screen flex items-center justify-center">Loading...</div>;
@@ -140,9 +171,24 @@ const ChatPage = () => {
             )}
           </div>
         </div>
-        <button onClick={startVideoCall} className="btn btn-ghost btn-circle">
-          <Video size={20} />
-        </button>
+
+        {/* Call buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => startCall("voice")}
+            className="btn btn-ghost btn-circle"
+            title="Voice Call"
+          >
+            <Phone size={20} />
+          </button>
+          <button
+            onClick={() => startCall("video")}
+            className="btn btn-ghost btn-circle"
+            title="Video Call"
+          >
+            <Video size={20} />
+          </button>
+        </div>
       </div>
 
       {/* Messages area */}
@@ -196,6 +242,30 @@ const ChatPage = () => {
           <Send size={20} />
         </button>
       </form>
+
+      {/* Incoming call modal */}
+      {incomingCall && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="card bg-base-100 shadow-2xl p-6 text-center space-y-4">
+            <h2 className="text-xl font-bold">Incoming Call</h2>
+            <p className="text-lg">{incomingCall.fromName}</p>
+            <div className="flex justify-center gap-4">
+              <button
+                onClick={acceptCall}
+                className="btn btn-success btn-lg gap-2"
+              >
+                <Phone size={20} /> Accept
+              </button>
+              <button
+                onClick={declineCall}
+                className="btn btn-error btn-lg gap-2"
+              >
+                <PhoneOff size={20} /> Decline
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
