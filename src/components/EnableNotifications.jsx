@@ -8,24 +8,19 @@ const EnableNotifications = () => {
 
   useEffect(() => {
     const check = () => {
-      const soundReady = (window._audioUnlocked === true);
+      const soundReady = window._audioUnlocked === true;
       const notifReady = Notification.permission === "granted";
       setVisible(!(soundReady && notifReady));
     };
     check();
-
-    // Listen for audio unlocked event (optional, for reactivity)
     window.addEventListener("audioUnlocked", check);
     return () => window.removeEventListener("audioUnlocked", check);
   }, []);
 
   const handleClick = () => {
-    // 1. Unlock audio (singleton, safe)
-    unlockAudioNow();
-    // 2. Request notification permission
+    unlockAudioNow(); // unlocks audio (silent mp3)
     Notification.requestPermission().then((result) => {
       if (result === "granted") {
-        // Notify other components (optional)
         window.dispatchEvent(new Event("audioUnlocked"));
         setVisible(false);
       }
