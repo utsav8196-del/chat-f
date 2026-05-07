@@ -170,9 +170,9 @@ const ProfilePage = () => {
                       onClick={() => fileInputRef.current?.click()}
                       className="btn btn-outline btn-sm gap-1"
                     >
-                      <Upload size={16} />
+                      {/* <Upload size={16} />
                       Upload Photo
-                    </button>
+                    </button> */}
                     <input
                       ref={fileInputRef}
                       type="file"
