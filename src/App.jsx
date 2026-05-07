@@ -10,6 +10,7 @@ import CallPage from './Pages/CallPage'            // <-- import
 import ChatPage from './Pages/ChatPage'
 import NotificationsPage from './Pages/NotificationsPage'
 import useNotifications from "./hooks/useNotifications";
+import EnableNotifications from "./components/EnableNotifications";
 
 import PageLoader from './components/PageLoader'
 import Layout from './components/Layout'

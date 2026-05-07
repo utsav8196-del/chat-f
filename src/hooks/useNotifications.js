@@ -3,65 +3,61 @@ import { useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import useAuthUser from "./useAuthUser";
 
+let audioUnlocked = false;       // global flag, survives re-renders
+let ringtoneAudio = null;        // shared across hook instances
+
+const unlockAudio = () => {
+  if (audioUnlocked) return;
+  // Create and immediately play‑pause to unlock the audio context
+  const temp = new Audio("/notification.mp3");
+  temp.play()
+    .then(() => {
+      temp.pause();
+      temp.currentTime = 0;
+      audioUnlocked = true;
+      console.log("🔊 Audio unlocked successfully");
+    })
+    .catch(() => {
+      // Still might fail if user hasn't interacted
+      console.log("Audio unlock deferred – click anywhere to enable sound");
+    });
+};
+
 const useNotifications = () => {
   const { authUser } = useAuthUser();
-  const audioRef = useRef(null);          // ringtone audio element
-  const audioUnlockedRef = useRef(false); // tracks if user has interacted
 
   useEffect(() => {
     if (!authUser) return;
 
+    // ----- ONE‑TIME AUDIO UNLOCK -----
+    // Attach a click listener to the whole document (most reliable)
+    const handleClick = () => unlockAudio();
+    document.addEventListener("click", handleClick, { once: true });
+
+    // Also try immediately – works if user already clicked before this hook ran
+    unlockAudio();
+
+    // ----- SOCKET CONNECTION -----
     const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
       ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, "")
       : "http://localhost:8000";
 
-    // ---------- AUDIO CONTEXT UNLOCK ----------
-    // Create the audio element early so we can attempt playback
-    const ringtone = new Audio("/notification.mp3");
-    ringtone.loop = true;
-    audioRef.current = ringtone;
-
-    // Function to unlock audio (must be called after user gesture)
-    const unlockAudio = async () => {
-      if (audioUnlockedRef.current) return;
-      try {
-        // Start and immediately pause to unlock
-        await ringtone.play();
-        ringtone.pause();
-        ringtone.currentTime = 0;
-        audioUnlockedRef.current = true;
-        console.log("🔊 Audio unlocked");
-      } catch (e) {
-        console.warn("Audio unlock failed, will retry on user click");
-      }
-    };
-
-    // Attempt to unlock on any user click
-    const clickHandler = () => unlockAudio();
-    document.addEventListener("click", clickHandler, { once: false });
-
-    // Also try immediately (might work if user already clicked something before hook runs)
-    unlockAudio();
-
-    // ---------- NOTIFICATION PERMISSION ----------
-    const requestPermission = async () => {
-      if (Notification.permission === "default") {
-        const result = await Notification.requestPermission();
-        console.log("Notification permission:", result);
-      }
-    };
-    requestPermission();
-
-    // ---------- SOCKET CONNECTION ----------
     const socket = io(BACKEND_URL, { withCredentials: true });
 
-    const showNotification = (title, options = {}) => {
+    // Prepare ringtone (used for incoming calls)
+    if (!ringtoneAudio) {
+      ringtoneAudio = new Audio("/notification.mp3");
+      ringtoneAudio.loop = true;
+    }
+
+    // ----- NOTIFICATION HELPER -----
+    const showNotification = (title, options) => {
       if (Notification.permission === "granted") {
         new Notification(title, { ...options, icon: "/vite.svg" });
       }
     };
 
-    // ---------- INCOMING CALL (ringtone loop) ----------
+    // ----- INCOMING CALL (ringtone loop) -----
     socket.on("incomingCall", (data) => {
       if (data.from !== authUser._id) {
         showNotification("Incoming Call", {
@@ -69,40 +65,35 @@ const useNotifications = () => {
           requireInteraction: true,
         });
 
-        // Start ringtone (if audio is unlocked, it will play; otherwise user click will trigger later)
-        if (audioRef.current) {
-          audioRef.current.currentTime = 0;
-          audioRef.current.play().catch(() => {});
-        }
+        // Start ringtone (works because audio is unlocked by now)
+        ringtoneAudio.currentTime = 0;
+        ringtoneAudio.play().catch(() => {
+          console.warn("Ringtone blocked by browser – click anywhere first");
+        });
       }
     });
 
-    // Stop ringtone when call is resolved
+    // Stop ringtone when call resolved
     const stopRingtone = () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.currentTime = 0;
-      }
+      ringtoneAudio.pause();
+      ringtoneAudio.currentTime = 0;
     };
     socket.on("callAccepted", stopRingtone);
     socket.on("callDeclined", stopRingtone);
     socket.on("callEnded", stopRingtone);
 
-    // ---------- NEW MESSAGE (short sound) ----------
+    // ----- NEW MESSAGE (short beep) -----
     socket.on("newMessage", (message) => {
       if (message.senderId !== authUser._id) {
-        showNotification("New Message", {
-          body: message.text,
-        });
+        showNotification("New Message", { body: message.text });
 
-        // Play a short beep (non‑looping)
         const beep = new Audio("/notification.mp3");
         beep.loop = false;
         beep.play().catch(() => {});
       }
     });
 
-    // ---------- FRIEND REQUEST ----------
+    // ----- FRIEND REQUEST -----
     socket.on("friendRequestReceived", (data) => {
       if (data.from !== authUser._id) {
         showNotification("Friend Request", {
@@ -113,13 +104,9 @@ const useNotifications = () => {
 
     // Cleanup
     return () => {
-      document.removeEventListener("click", clickHandler);
+      document.removeEventListener("click", handleClick);
       socket.disconnect();
       stopRingtone();
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
     };
   }, [authUser]);
 };
