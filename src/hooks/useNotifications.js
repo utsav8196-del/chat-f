@@ -1,12 +1,15 @@
+// hooks/useNotifications.js
 import { useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import useAuthUser from "./useAuthUser";
 
-let audioUnlocked = false;          // global flag
-let ringtoneAudio = null;           // reused Audio element for incoming calls
-let pendingSounds = [];             // sounds waiting for unlock
+// Global audio state
+let audioUnlocked = false;
+let ringtoneAudio = null;        // looping sound for incoming calls
+let pendingSounds = [];          // sounds waiting to be played
 
-function unlockAudioNow() {
+// This function must be called from a user click (the button).
+export function unlockAudioNow() {
   if (audioUnlocked) return;
   const temp = new Audio("/notification.mp3");
   temp.play()
@@ -14,26 +17,25 @@ function unlockAudioNow() {
       temp.pause();
       temp.currentTime = 0;
       audioUnlocked = true;
-      window._audioUnlocked = true;   // add this
-      window.dispatchEvent(new Event("audioUnlocked"));
-      pendingSounds.forEach(audio => audio.play().catch(() => {}));
+      if (window) window._audioUnlocked = true;
+      // Play all queued sounds
+      pendingSounds.forEach(audio => {
+        audio.play().catch(() => {});
+      });
       pendingSounds = [];
+      console.log("🔊 Audio unlocked successfully");
     })
-    .catch(() => {
-      console.log("Audio unlock deferred – click anywhere to enable sound");
+    .catch((err) => {
+      // Still might fail if user hasn't interacted? The button click ensures it will work.
+      console.error("Unable to unlock audio even after click:", err);
     });
 }
+
 const useNotifications = () => {
   const { authUser } = useAuthUser();
   const socketRef = useRef(null);
 
   useEffect(() => {
-    // Try to unlock on any click (runs only once per page load)
-    const clickHandler = () => unlockAudioNow();
-    document.addEventListener("click", clickHandler);
-    // Also try immediately (works if user already clicked before this hook mounted)
-    unlockAudioNow();
-
     if (!authUser) return;
 
     const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
@@ -55,13 +57,14 @@ const useNotifications = () => {
       }
     };
 
-    // --- Incoming Call ---
+    // ----- Incoming Call -----
     socket.on("incomingCall", (data) => {
       if (data.from !== authUser._id) {
         showNotification("Incoming Call", {
           body: `${data.fromName} is calling...`,
           requireInteraction: true,
         });
+
         ringtoneAudio.currentTime = 0;
         if (audioUnlocked) {
           ringtoneAudio.play().catch(() => {});
@@ -76,12 +79,11 @@ const useNotifications = () => {
       ringtoneAudio.currentTime = 0;
       pendingSounds = pendingSounds.filter(a => a !== ringtoneAudio);
     };
-
     socket.on("callAccepted", stopRingtone);
     socket.on("callDeclined", stopRingtone);
     socket.on("callEnded", stopRingtone);
 
-    // --- New Message ---
+    // ----- New Message -----
     socket.on("newMessage", (message) => {
       if (message.senderId !== authUser._id) {
         showNotification("New Message", { body: message.text });
@@ -95,7 +97,7 @@ const useNotifications = () => {
       }
     });
 
-    // --- Friend Request ---
+    // ----- Friend Request -----
     socket.on("friendRequestReceived", (data) => {
       if (data.from !== authUser._id) {
         showNotification("Friend Request", {
@@ -105,7 +107,6 @@ const useNotifications = () => {
     });
 
     return () => {
-      document.removeEventListener("click", clickHandler);
       socket.disconnect();
       stopRingtone();
     };
@@ -113,4 +114,3 @@ const useNotifications = () => {
 };
 
 export default useNotifications;
-export { unlockAudioNow };   // for button to call directly

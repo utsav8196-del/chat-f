@@ -1,3 +1,4 @@
+// components/EnableNotifications.jsx
 import { BellRing } from "lucide-react";
 import { useEffect, useState } from "react";
 import { unlockAudioNow } from "../hooks/useNotifications";
@@ -7,19 +8,25 @@ const EnableNotifications = () => {
 
   useEffect(() => {
     const check = () => {
-      const soundReady = window._audioUnlocked || false;
+      const soundReady = (window._audioUnlocked === true);
       const notifReady = Notification.permission === "granted";
       setVisible(!(soundReady && notifReady));
     };
     check();
+
+    // Listen for audio unlocked event (optional, for reactivity)
     window.addEventListener("audioUnlocked", check);
     return () => window.removeEventListener("audioUnlocked", check);
   }, []);
 
   const handleClick = () => {
-    unlockAudioNow();   // force unlock
+    // 1. Unlock audio (singleton, safe)
+    unlockAudioNow();
+    // 2. Request notification permission
     Notification.requestPermission().then((result) => {
       if (result === "granted") {
+        // Notify other components (optional)
+        window.dispatchEvent(new Event("audioUnlocked"));
         setVisible(false);
       }
     });
@@ -28,10 +35,10 @@ const EnableNotifications = () => {
   if (!visible) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50">
+    <div className="fixed bottom-5 right-5 z-50">
       <button
         onClick={handleClick}
-        className="btn btn-primary btn-circle shadow-lg animate-bounce"
+        className="btn btn-primary btn-circle shadow-xl animate-bounce text-white"
         title="Enable Sound & Notifications"
       >
         <BellRing size={24} />

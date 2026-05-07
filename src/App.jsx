@@ -6,9 +6,10 @@ import HomePage from './Pages/HomePage'
 import LoginPage from './Pages/LoginPage'
 import SignUpPage from './Pages/SignUpPage'
 import OnboardingPage from './Pages/OnboardingPage'
-import CallPage from './Pages/CallPage'            // <-- import
+import CallPage from './Pages/CallPage'
 import ChatPage from './Pages/ChatPage'
 import NotificationsPage from './Pages/NotificationsPage'
+
 import useNotifications from "./hooks/useNotifications";
 import EnableNotifications from "./components/EnableNotifications";
 
@@ -25,6 +26,7 @@ const App = () => {
   const { isLoading, authUser } = useAuthUser();
   const { theme } = useThemeStore();
 
+  // Activate real‑time notifications (socket listeners) for the logged‑in user
   useNotifications();
 
   const isAuthenticated = Boolean(authUser);
@@ -118,9 +120,13 @@ const App = () => {
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" />} />
-
       </Routes>
+
+      {/* Toast notifications */}
       <Toaster />
+
+      {/* Floating button to enable sound & browser notifications */}
+      <EnableNotifications />
     </div>
   )
 }
