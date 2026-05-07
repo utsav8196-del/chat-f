@@ -3,21 +3,18 @@ import { useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import useAuthUser from "./useAuthUser";
 
-// Global audio state
+// Global state
 let audioUnlocked = false;
-let ringtoneAudio = null;        // optional user-provided mp3
-let pendingSounds = [];          // sounds waiting for audio unlock
-
-// ---------- AUDIO CONTEXT (for generated beeps) ----------
+let pendingSounds = [];          // array of { play: fn, stop: fn }
+let currentRingtone = null;      // the currently active ringtone object
 let audioCtx = null;
+
+// ---------- AUDIO HELPERS ----------
 function getAudioContext() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return audioCtx;
 }
 
-// Play a short beep
 function playBeep(duration = 150, frequency = 880, type = "sine") {
   try {
     const ctx = getAudioContext();
@@ -31,12 +28,10 @@ function playBeep(duration = 150, frequency = 880, type = "sine") {
     oscillator.start();
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration / 1000);
     oscillator.stop(ctx.currentTime + duration / 1000 + 0.05);
-  } catch (e) {
-    console.warn("Web Audio API not supported");
-  }
+  } catch (e) {}
 }
 
-// ---------- RINGTONE (prefers mp3, falls back to looping beep) ----------
+// ---------- RINGTONE (looping beep + optional custom mp3) ----------
 let beepInterval = null;
 function startBeepRingtone() {
   stopBeepRingtone();
@@ -50,30 +45,47 @@ function stopBeepRingtone() {
   }
 }
 
-// Create ringtone Audio element (optional custom mp3)
-function createRingtone() {
-  if (ringtoneAudio) return ringtoneAudio;
+let audioElement = null; // optional custom mp3 element
 
+function createRingtoneAudioElement() {
+  if (audioElement) return audioElement;
   const audio = new Audio("/notification.mp3");
   audio.loop = true;
   audio.preload = "auto";
-  audio.onerror = () => {
-    console.warn("Custom notification.mp3 not found – using generated beep");
-    // If the custom file fails, we'll fall back to beep automatically later
-  };
-  ringtoneAudio = audio;
+  audio.onerror = () => console.warn("Custom notification.mp3 not found – using beep");
+  audioElement = audio;
   return audio;
 }
 
-// ---------- UNLOCK FUNCTION (must be called from user click) ----------
+// Creates a ringtone object that can be started and stopped
+function createRingtoneObject() {
+  return {
+    play: () => {
+      // Try custom mp3 first
+      const audio = createRingtoneAudioElement();
+      audio.currentTime = 0;
+      audio.play().catch(() => {
+        // Fall back to beep ringtone
+        startBeepRingtone();
+      });
+    },
+    stop: () => {
+      const audio = audioElement;
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      stopBeepRingtone();
+    }
+  };
+}
+
+// ---------- UNLOCK AUDIO ----------
 export function unlockAudioNow() {
   if (audioUnlocked) return;
-
   try {
     const ctx = getAudioContext();
-    // Resume the context (unlocks audio after user gesture)
     ctx.resume().then(() => {
-      // Create a silent buffer to ensure context is fully active
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
@@ -85,27 +97,28 @@ export function unlockAudioNow() {
       window._audioUnlocked = true;
 
       // Play all queued sounds
-      pendingSounds.forEach(audio => {
-        audio.play().catch(() => {
-          // If it's the ringtone and still fails, fall back to beep
-          if (audio === ringtoneAudio) {
-            startBeepRingtone();
-          } else {
-            playBeep();
-          }
-        });
-      });
+      pendingSounds.forEach(sound => sound.play());
       pendingSounds = [];
       console.log("🔊 Audio unlocked");
-    }).catch((err) => {
+    }).catch(err => {
       console.error("Audio unlock failed:", err);
-      alert("Unable to enable sound. Please check your browser settings.");
     });
   } catch (err) {
     console.error("Audio unlock error:", err);
   }
 }
 
+// Stop the ringtone globally (called from ChatPage)
+export function stopGlobalRingtone() {
+  if (currentRingtone) {
+    currentRingtone.stop();
+    currentRingtone = null;
+  }
+  // Also remove any pending ringtone
+  pendingSounds = pendingSounds.filter(sound => sound !== currentRingtone);
+}
+
+// ---------- NOTIFICATION HOOK ----------
 const useNotifications = () => {
   const { authUser } = useAuthUser();
   const socketRef = useRef(null);
@@ -119,9 +132,6 @@ const useNotifications = () => {
 
     const socket = io(BACKEND_URL, { withCredentials: true });
     socketRef.current = socket;
-
-    // Create ringtone element
-    createRingtone();
 
     const showNotification = (title, options) => {
       if (Notification.permission === "granted") {
@@ -137,24 +147,24 @@ const useNotifications = () => {
           requireInteraction: true,
         });
 
-        // Try to play custom ringtone first
-        ringtoneAudio.currentTime = 0;
+        const ringtone = createRingtoneObject();
+        currentRingtone = ringtone;
+
         if (audioUnlocked) {
-          ringtoneAudio.play().catch(() => {
-            // If custom mp3 fails, fall back to beep ringtone
-            startBeepRingtone();
-          });
+          ringtone.play();
         } else {
-          pendingSounds.push(ringtoneAudio);
+          pendingSounds.push(ringtone);
         }
       }
     });
 
+    // Stop ringtone when call is resolved via server events
     const stopRingtones = () => {
-      ringtoneAudio.pause();
-      ringtoneAudio.currentTime = 0;
-      stopBeepRingtone();
-      pendingSounds = pendingSounds.filter(a => a !== ringtoneAudio);
+      if (currentRingtone) {
+        currentRingtone.stop();
+        currentRingtone = null;
+      }
+      pendingSounds = pendingSounds.filter(s => s !== currentRingtone);
     };
 
     socket.on("callAccepted", stopRingtones);
@@ -166,15 +176,14 @@ const useNotifications = () => {
       if (message.senderId !== authUser._id) {
         showNotification("New Message", { body: message.text });
 
-        // Always use generated beep for messages (no file dependency)
+        const beepSound = {
+          play: () => playBeep(100, 660),
+          stop: () => {}
+        };
         if (audioUnlocked) {
-          playBeep(100, 660);
+          beepSound.play();
         } else {
-          // Queue a simple function to play beep after unlock
-          pendingSounds.push({
-            play: () => playBeep(100, 660),
-            pause: () => {}
-          });
+          pendingSounds.push(beepSound);
         }
       }
     });

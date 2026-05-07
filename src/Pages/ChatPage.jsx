@@ -5,6 +5,7 @@ import useAuthUser from "../hooks/useAuthUser";
 import { axiosInstance } from "../lib/axios";
 import { io } from "socket.io-client";
 import toast from "react-hot-toast";
+import { stopGlobalRingtone } from "../hooks/useNotifications";
 import {
   Send,
   User,
@@ -142,20 +143,21 @@ const ChatPage = () => {
   };
 
   // Accept incoming call
-  const acceptCall = () => {
-    if (!incomingCall || !socketRef.current) return;
-    socketRef.current.emit("acceptCall", { to: incomingCall.from });
-    navigate(`/call/${incomingCall.from}?type=${incomingCall.callType}`);
-    setIncomingCall(null);
-  };
+const acceptCall = () => {
+  if (!incomingCall || !socketRef.current) return;
+  stopGlobalRingtone();   // <-- ADD THIS
+  socketRef.current.emit("acceptCall", { to: incomingCall.from });
+  navigate(`/call/${incomingCall.from}?type=${incomingCall.callType}`);
+  setIncomingCall(null);
+};
 
-  // Decline incoming call
-  const declineCall = () => {
-    if (!incomingCall || !socketRef.current) return;
-    socketRef.current.emit("declineCall", { to: incomingCall.from });
-    setIncomingCall(null);
-  };
-
+// Decline incoming call
+const declineCall = () => {
+  if (!incomingCall || !socketRef.current) return;
+  stopGlobalRingtone();   // <-- ADD THIS
+  socketRef.current.emit("declineCall", { to: incomingCall.from });
+  setIncomingCall(null);
+};
   if (isLoading)
     return (
       <div className="h-screen flex items-center justify-center">
