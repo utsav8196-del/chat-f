@@ -1,15 +1,18 @@
 // hooks/useNotifications.js
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
+import { useQueryClient } from "@tanstack/react-query";
+import { acceptFriendRequest, declineFriendRequest } from "../lib/api";
 import useAuthUser from "./useAuthUser";
+import toast from "react-hot-toast";
 
-// Global state
+// Global audio state
 let audioUnlocked = false;
-let pendingSounds = [];          // array of { play: fn, stop: fn }
-let currentRingtone = null;      // the currently active ringtone object
+let pendingSounds = [];
+let currentRingtone = null;
 let audioCtx = null;
 
-// ---------- AUDIO HELPERS ----------
+// ---------- AUDIO HELPERS (same as before) ----------
 function getAudioContext() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return audioCtx;
@@ -31,7 +34,6 @@ function playBeep(duration = 150, frequency = 880, type = "sine") {
   } catch (e) {}
 }
 
-// ---------- RINGTONE (looping beep + optional custom mp3) ----------
 let beepInterval = null;
 function startBeepRingtone() {
   stopBeepRingtone();
@@ -45,42 +47,34 @@ function stopBeepRingtone() {
   }
 }
 
-let audioElement = null; // optional custom mp3 element
-
+let audioElement = null;
 function createRingtoneAudioElement() {
   if (audioElement) return audioElement;
   const audio = new Audio("/notification.mp3");
   audio.loop = true;
   audio.preload = "auto";
-  audio.onerror = () => console.warn("Custom notification.mp3 not found – using beep");
+  audio.onerror = () => {};
   audioElement = audio;
   return audio;
 }
 
-// Creates a ringtone object that can be started and stopped
 function createRingtoneObject() {
   return {
     play: () => {
-      // Try custom mp3 first
       const audio = createRingtoneAudioElement();
       audio.currentTime = 0;
-      audio.play().catch(() => {
-        // Fall back to beep ringtone
-        startBeepRingtone();
-      });
+      audio.play().catch(() => startBeepRingtone());
     },
     stop: () => {
-      const audio = audioElement;
-      if (audio) {
-        audio.pause();
-        audio.currentTime = 0;
+      if (audioElement) {
+        audioElement.pause();
+        audioElement.currentTime = 0;
       }
       stopBeepRingtone();
     }
   };
 }
 
-// ---------- UNLOCK AUDIO ----------
 export function unlockAudioNow() {
   if (audioUnlocked) return;
   try {
@@ -92,36 +86,29 @@ export function unlockAudioNow() {
       source.connect(ctx.destination);
       source.start();
       source.stop(ctx.currentTime + 0.001);
-
       audioUnlocked = true;
       window._audioUnlocked = true;
-
-      // Play all queued sounds
       pendingSounds.forEach(sound => sound.play());
       pendingSounds = [];
-      console.log("🔊 Audio unlocked");
-    }).catch(err => {
-      console.error("Audio unlock failed:", err);
-    });
-  } catch (err) {
-    console.error("Audio unlock error:", err);
-  }
+    }).catch(() => {});
+  } catch (e) {}
 }
 
-// Stop the ringtone globally (called from ChatPage)
 export function stopGlobalRingtone() {
   if (currentRingtone) {
     currentRingtone.stop();
     currentRingtone = null;
   }
-  // Also remove any pending ringtone
-  pendingSounds = pendingSounds.filter(sound => sound !== currentRingtone);
+  pendingSounds = pendingSounds.filter(s => s !== currentRingtone);
 }
 
 // ---------- NOTIFICATION HOOK ----------
 const useNotifications = () => {
   const { authUser } = useAuthUser();
+  const queryClient = useQueryClient();
   const socketRef = useRef(null);
+
+  const [friendRequestPopup, setFriendRequestPopup] = useState(null); // { _id, from, fromName }
 
   useEffect(() => {
     if (!authUser) return;
@@ -149,7 +136,6 @@ const useNotifications = () => {
 
         const ringtone = createRingtoneObject();
         currentRingtone = ringtone;
-
         if (audioUnlocked) {
           ringtone.play();
         } else {
@@ -158,7 +144,6 @@ const useNotifications = () => {
       }
     });
 
-    // Stop ringtone when call is resolved via server events
     const stopRingtones = () => {
       if (currentRingtone) {
         currentRingtone.stop();
@@ -175,16 +160,9 @@ const useNotifications = () => {
     socket.on("newMessage", (message) => {
       if (message.senderId !== authUser._id) {
         showNotification("New Message", { body: message.text });
-
-        const beepSound = {
-          play: () => playBeep(100, 660),
-          stop: () => {}
-        };
-        if (audioUnlocked) {
-          beepSound.play();
-        } else {
-          pendingSounds.push(beepSound);
-        }
+        const beep = { play: () => playBeep(100, 660), stop: () => {} };
+        if (audioUnlocked) beep.play();
+        else pendingSounds.push(beep);
       }
     });
 
@@ -194,6 +172,8 @@ const useNotifications = () => {
         showNotification("Friend Request", {
           body: `${data.fromName} sent you a friend request`,
         });
+        // Show in-app popup
+        setFriendRequestPopup(data);
       }
     });
 
@@ -203,6 +183,36 @@ const useNotifications = () => {
       stopBeepRingtone();
     };
   }, [authUser]);
+
+  // Handlers for the popup
+  const handleAcceptRequest = useCallback(async (requestId) => {
+    try {
+      await acceptFriendRequest(requestId);
+      toast.success("Friend request accepted");
+      queryClient.invalidateQueries({ queryKey: ["friendRequests"] });
+      queryClient.invalidateQueries({ queryKey: ["friends"] });
+      setFriendRequestPopup(null);
+    } catch (error) {
+      toast.error(error?.response?.data?.message || "Failed to accept request");
+    }
+  }, [queryClient]);
+
+  const handleDeclineRequest = useCallback(async (requestId) => {
+    try {
+      await declineFriendRequest(requestId);
+      toast.success("Friend request declined");
+      queryClient.invalidateQueries({ queryKey: ["friendRequests"] });
+      setFriendRequestPopup(null);
+    } catch (error) {
+      toast.error(error?.response?.data?.message || "Failed to decline request");
+    }
+  }, [queryClient]);
+
+  return {
+    friendRequestPopup,
+    acceptFriendRequest: handleAcceptRequest,
+    declineFriendRequest: handleDeclineRequest,
+  };
 };
 
 export default useNotifications;
